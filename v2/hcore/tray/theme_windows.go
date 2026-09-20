@@ -31,6 +31,7 @@ func applyThemeMode(themeMode string) {
 	default:
 		setPreferredAppMode(0)
 	}
+	refreshImmersiveColorPolicyState()
 }
 
 func stringsToLower(s string) string {
@@ -56,8 +57,17 @@ func allowDarkModeForApp(allow bool) {
 	_, _, _ = proc.Call(v)
 }
 
+// applyDarkContextMenu aligns the native Win32 popup menu chrome with the app
+// theme before the menu is (re)created. Called from onReady so the immersive
+// dark/light mode is flushed before TrackPopupMenuEx first runs.
 func applyDarkContextMenu() {
-	setPreferredAppMode(1)
+	allowDarkModeForApp(true)
+	if darkMenu {
+		setPreferredAppMode(1)
+	} else {
+		setPreferredAppMode(0)
+	}
+	refreshImmersiveColorPolicyState()
 }
 
 func setPreferredAppMode(mode int32) bool {
@@ -68,4 +78,15 @@ func setPreferredAppMode(mode int32) bool {
 	}
 	r, _, _ := proc.Call(uintptr(mode))
 	return r != 0
+}
+
+// refreshImmersiveColorPolicyState tells uxtheme to re-read the preferred app
+// mode so the next menu/metrics repaint honours dark or light.
+func refreshImmersiveColorPolicyState() {
+	uxtheme := windows.NewLazySystemDLL("uxtheme.dll")
+	proc := uxtheme.NewProc("RefreshImmersiveColorPolicyState")
+	if proc.Find() != nil {
+		return
+	}
+	_, _, _ = proc.Call()
 }

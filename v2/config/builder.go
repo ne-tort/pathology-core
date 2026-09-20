@@ -191,6 +191,18 @@ func setOutbounds(options *option.Options, input *option.Options, opt *ClientOpt
 			continue
 		case "custom": // LX-STUB: C.TypeCustom absent in sing-box-lx
 			continue
+		case "punnel": // reverse provider — keep outbound, never a dialable leaf
+			// ExpandPunnel removes the parent tag; putting it in lowest/balance
+			// would yield dependency[…punnel…] not found for outbound[lowest].
+			//
+			// Drop provider clones whose detour is an IPv6 leaf when IPv6 leaves
+			// are filtered — otherwise start fails with dependency[…-ipv6] not
+			// found (legacy subs that node-expanded punnel via detour {node:suffix}).
+			if !keepIPv6 && dialerDetourIsIPv6Leaf(out.Options) {
+				continue
+			}
+			outbounds = append(outbounds, out)
+			continue
 		default:
 
 			if contains([]string{"direct", "bypass", "block"}, out.Tag) {

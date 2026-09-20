@@ -11,64 +11,66 @@ import (
 	"github.com/ne-tort/pathology-core/v2/hcore/session"
 )
 
-func TestToggleUiOnTrayDoubleClickDetached(t *testing.T) {
+func TestShowOrSpawnUiOnTrayClickDetachedShowsWhenAlive(t *testing.T) {
 	dir := t.TempDir()
 	basePath = dir
 	uiLifecycle = UiLifecycleDetached
 	t.Cleanup(resetUiControlHooks)
 
-	var actions []string
-	origSignal := signalUiControl
-	// capture actions by wrapping — signalUiControl is not overridable; check file instead
-	_ = origSignal
-
-	spawnCalled := false
-	origSpawn := spawnUiReconnect
-	// spawnUiReconnect is not exported for override; test via file + hooks
-
 	setUiControlHooks(
-		func() session.State {
-			return session.State{UiPid: 1234}
-		},
+		func() session.State { return session.State{UiPid: 1234} },
 		func(pid int) bool { return pid == 1234 },
 	)
 
-	ToggleUiOnTrayDoubleClickDetached()
-	path := filepath.Join(dir, uiControlFile)
-	raw, err := os.ReadFile(path)
+	ShowOrSpawnUiOnTrayClickDetached()
+	raw, err := os.ReadFile(filepath.Join(dir, uiControlFile))
 	if err != nil {
-		t.Fatalf("expected quit file: %v", err)
+		t.Fatalf("expected show signal file: %v", err)
 	}
-	if string(raw) == "" {
-		t.Fatal("empty quit payload")
+	if !strings.Contains(string(raw), `"action":"show"`) {
+		t.Fatalf("alive UI should be shown, got %s", string(raw))
 	}
-	if len(actions) > 0 {
-		t.Fatalf("unexpected actions: %v", actions)
-	}
-	_ = spawnCalled
-	_ = origSpawn
 }
 
-func TestToggleUiOnTrayDoubleClickEmbedded(t *testing.T) {
+func TestShowOrSpawnUiOnTrayClickDetachedDoesNotQuitWhenAlive(t *testing.T) {
+	dir := t.TempDir()
+	basePath = dir
+	uiLifecycle = UiLifecycleDetached
+	t.Cleanup(resetUiControlHooks)
+
+	setUiControlHooks(
+		func() session.State { return session.State{UiPid: 1234} },
+		func(pid int) bool { return pid == 1234 },
+	)
+
+	ShowOrSpawnUiOnTrayClickDetached()
+	raw, _ := os.ReadFile(filepath.Join(dir, uiControlFile))
+	if strings.Contains(string(raw), `"action":"quit"`) {
+		t.Fatalf("tray click must never quit a live UI, got %s", string(raw))
+	}
+}
+
+func TestShowOrSpawnUiOnTrayClickEmbeddedAlwaysShows(t *testing.T) {
 	dir := t.TempDir()
 	basePath = dir
 	uiLifecycle = UiLifecycleEmbedded
 	t.Cleanup(resetUiControlHooks)
 
 	setUiControlHooks(
-		func() session.State {
-			return session.State{UiPid: 999}
-		},
+		func() session.State { return session.State{UiPid: 999} },
 		func(pid int) bool { return pid == 999 },
 	)
 
-	ToggleUiOnTrayDoubleClickEmbedded()
+	ShowOrSpawnUiOnTrayClickEmbedded()
 	raw, err := os.ReadFile(filepath.Join(dir, uiControlFile))
 	if err != nil {
-		t.Fatalf("expected toggle file: %v", err)
+		t.Fatalf("expected show signal file: %v", err)
 	}
-	if !strings.Contains(string(raw), `"action":"toggle"`) {
-		t.Fatalf("expected toggle action, got %s", string(raw))
+	if !strings.Contains(string(raw), `"action":"show"`) {
+		t.Fatalf("embedded click should only show, got %s", string(raw))
+	}
+	if strings.Contains(string(raw), `"action":"toggle"`) {
+		t.Fatalf("embedded click must never toggle (close) UI, got %s", string(raw))
 	}
 }
 
@@ -78,9 +80,7 @@ func TestSpawnUiReconnectSkipsWhenPidAlive(t *testing.T) {
 	t.Cleanup(resetUiControlHooks)
 
 	setUiControlHooks(
-		func() session.State {
-			return session.State{UiPid: 42}
-		},
+		func() session.State { return session.State{UiPid: 42} },
 		func(pid int) bool { return pid == 42 },
 	)
 
@@ -94,7 +94,7 @@ func TestSpawnUiReconnectSkipsWhenPidAlive(t *testing.T) {
 	}
 }
 
-func TestOnTrayDoubleClickRoutesByLifecycle(t *testing.T) {
+func TestOnTrayClickRoutesByLifecycle(t *testing.T) {
 	dir := t.TempDir()
 	basePath = dir
 	t.Cleanup(resetUiControlHooks)
@@ -105,17 +105,23 @@ func TestOnTrayDoubleClickRoutesByLifecycle(t *testing.T) {
 	)
 
 	uiLifecycle = UiLifecycleEmbedded
-	onTrayDoubleClick()
-	raw, _ := os.ReadFile(filepath.Join(dir, uiControlFile))
-	if !strings.Contains(string(raw), `"action":"toggle"`) {
-		t.Fatal("embedded should write toggle")
+	onTrayClick()
+	raw, err := os.ReadFile(filepath.Join(dir, uiControlFile))
+	if err != nil {
+		t.Fatalf("embedded click should write a signal: %v", err)
+	}
+	if !strings.Contains(string(raw), `"action":"show"`) {
+		t.Fatalf("embedded click should show, got %s", string(raw))
 	}
 
 	os.Remove(filepath.Join(dir, uiControlFile))
 	uiLifecycle = UiLifecycleDetached
-	onTrayDoubleClick()
-	raw, err := os.ReadFile(filepath.Join(dir, uiControlFile))
+	onTrayClick()
+	raw, err = os.ReadFile(filepath.Join(dir, uiControlFile))
 	if err != nil || len(raw) == 0 {
-		t.Fatal("detached should write quit")
+		t.Fatal("detached click should write a signal")
+	}
+	if !strings.Contains(string(raw), `"action":"show"`) {
+		t.Fatalf("detached click with alive UI should show, got %s", string(raw))
 	}
 }

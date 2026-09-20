@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net"
 	"strings"
+
+	"github.com/sagernet/sing-box/option"
 )
 
 // KeepIPv6Leaves reports whether IPv6 server leaves should stay in the build.
@@ -38,6 +40,16 @@ func IsIPv6Leaf(tag, serverHost string) bool {
 		return true
 	}
 	return IsIPv6Host(serverHost)
+}
+
+// dialerDetourIsIPv6Leaf reports whether opts expose a DialerOptions.Detour that
+// is an IPv6 leaf tag (suffix -ipv6), including namespaced tags ("profile · x-ipv6").
+func dialerDetourIsIPv6Leaf(opts any) bool {
+	w, ok := opts.(option.DialerOptionsWrapper)
+	if !ok {
+		return false
+	}
+	return IsIPv6LeafTag(w.TakeDialerOptions().Detour)
 }
 
 // outboundServerHost extracts a best-effort server/peer host from an outbound via JSON.

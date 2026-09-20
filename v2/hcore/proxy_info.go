@@ -162,7 +162,8 @@ func (h *PathologyInstance) GetAllProxiesInfo(hismap map[string]*adapter.URLTest
 				pinfo.TagDisplay = pinfo.TagDisplay + " → " + *pinfo.GroupSelectedTagDisplay
 			}
 			group.Items = append(group.Items, pinfo)
-			pinfo.IsVisible = !strings.Contains(itemTag, "§hide§")
+			pinfo.IsVisible = !strings.Contains(itemTag, "§hide§") &&
+				!strings.EqualFold(pinfo.Type, "punnel")
 
 		}
 		if len(group.Items) == 0 {

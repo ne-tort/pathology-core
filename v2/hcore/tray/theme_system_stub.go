@@ -18,6 +18,10 @@ func applyThemeMode(themeMode string) {
 	_ = themeMode
 }
 
+// applyDarkContextMenu is a no-op outside Windows; macOS/Linux menus use the
+// desktop toolkit's own theming and do not need a Win32 immersive mode flip.
+func applyDarkContextMenu() {}
+
 func stringsToLower(s string) string {
 	return strings.ToLower(s)
 }

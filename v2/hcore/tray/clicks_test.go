@@ -1,19 +1,14 @@
 package tray
 
-import (
-	"testing"
-	"time"
-)
+import "testing"
 
-func TestIsDoubleClick(t *testing.T) {
-	base := time.Now()
-	if isDoubleClick(base, time.Time{}) {
-		t.Fatal("first click should not be double")
-	}
-	if !isDoubleClick(base.Add(200*time.Millisecond), base) {
-		t.Fatal("200ms gap should count as double click")
-	}
-	if isDoubleClick(base.Add(500*time.Millisecond), base) {
-		t.Fatal("500ms gap should not count as double click")
-	}
+// TestSetupClickHandlersAcceptsHandler is a smoke test: the tray primary click
+// must register a single-click handler (no double-click gating that closes UI).
+func TestSetupClickHandlersAcceptsHandler(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("setupClickHandlers panicked: %v", r)
+		}
+	}()
+	setupClickHandlers(func() {})
 }

@@ -84,9 +84,26 @@ func StartTray(opts Options) {
 		}
 		initialPrefs := loadPrefs(basePath, fallbackLang)
 		initLabels(initialPrefs)
+		// Apply dark/light chrome before systray.Run so the native popup menu and
+		// tray window pick up the correct immersive theme on creation.
+		initTheme(themeMode)
 		registerDisplaySyncHandler()
-		setupClickHandlers(onTrayDoubleClick)
-		go systray.Run(onReady, onExit)
+		setupClickHandlers(onTrayClick)
+		// Tray goroutine owns the systray lifecycle. LockOSThread pins the Win32
+		// message loop (GetMessage/DispatchMessage → WndProc) to one OS thread,
+		// which Win32 message-only windows require. runDispatcher serializes all
+		// menu/icon mutations on a single goroutine so concurrent refresh requests
+		// from gRPC/prefs/transition pollers can't race with each other or with
+		// systrayMenuItemSelected inside WndProc.
+		go func() {
+			runtime.LockOSThread()
+			defer runtime.UnlockOSThread()
+			ctx, cancel := context.WithCancel(context.Background())
+			trayCtx = ctx
+			go runDispatcher(ctx.Done())
+			defer cancel()
+			systray.Run(onReady, onExit)
+		}()
 	})
 }
 
@@ -99,17 +116,12 @@ func SpawnUIReconnect() {
 
 func onReady() {
 	initTheme(themeMode)
+	applyDarkContextMenu()
 	systray.SetTitle("Pathology")
 	systray.SetTooltip("Pathology")
 	applyTrayIcon(hcore.CurrentCoreState(), darkMenu)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	trayCtx = ctx
-	go func() {
-		<-doneCh
-		cancel()
-	}()
-	startPrefsWatcher(ctx, basePath)
+	startPrefsWatcher(trayCtx, basePath)
 
 	showItem = systray.AddMenuItem(locale.ShowWindow, "")
 	systray.AddSeparator()
@@ -160,13 +172,16 @@ func onReady() {
 }
 
 func refreshTrayDisplay() {
-	p := loadPrefs(basePath, fallbackLang)
-	initLabels(p)
-	initTheme(themeMode)
-	refreshAllMenuLabels()
-	rebuildProfileSubmenuIfNeeded()
-	rebuildServiceModeChecksFrom(hcore.SessionGetState().ServiceMode)
-	refreshConnectionUI(hcore.CurrentCoreState())
+	dispatch(func() {
+		p := loadPrefs(basePath, fallbackLang)
+		initLabels(p)
+		initTheme(themeMode)
+		applyDarkContextMenu()
+		refreshAllMenuLabels()
+		rebuildProfileSubmenuIfNeeded()
+		rebuildServiceModeChecksFrom(hcore.SessionGetState().ServiceMode)
+		refreshConnectionUISync(hcore.CurrentCoreState())
+	})
 }
 
 func handleSession(fn func(context.Context) (*hcore.CoreInfoResponse, error)) {
@@ -187,7 +202,7 @@ func handleSetServiceMode(mode string) {
 		systray.SetTooltip("Pathology — " + err.Error())
 		return
 	}
-	rebuildServiceModeChecksFrom(st.ServiceMode)
+	dispatch(func() { rebuildServiceModeChecksFrom(st.ServiceMode) })
 	if hcore.CurrentCoreState() == hcore.CoreStates_STARTED {
 		handleSession(hcore.SessionReconnect)
 	}
@@ -333,6 +348,19 @@ func onExit() {
 			close(doneCh)
 		}
 	})
+	// Drain pending commands so queued refreshes after Quit don't touch a
+	// torn-down systray; isReady guards the actual Win32 calls anyway.
+	for {
+		select {
+		case fn, ok := <-cmdCh:
+			if !ok {
+				return
+			}
+			fn()
+		default:
+			return
+		}
+	}
 }
 
 func defaultUIExePath() string {

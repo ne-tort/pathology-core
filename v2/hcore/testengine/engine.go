@@ -784,9 +784,11 @@ func collectAllProbeLeaves(opts *option.Options) []string {
 		seen[tag] = struct{}{}
 		out = append(out, tag)
 	}
-	for _, ob := range opts.Outbounds {
+  for _, ob := range opts.Outbounds {
 		switch ob.Type {
 		case C.TypeSelector, C.TypeURLTest, C.TypeBalancer, C.TypeBlock, C.TypeDNS, C.TypeDirect:
+			continue
+		case "punnel": // reverse provider — not a probe leaf
 			continue
 		default:
 			add(ob.Tag)
