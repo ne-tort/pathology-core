@@ -1,0 +1,14 @@
+{
+  "showWindow": "Show window",
+  "connect": "Connect",
+  "disconnect": "Disconnect",
+  "reconnect": "Reconnect",
+  "quit": "Quit",
+  "connecting": "Connecting…",
+  "disconnecting": "Disconnecting…",
+  "serviceMode": "Service mode",
+  "modeProxy": "Proxy only",
+  "modeSystemProxy": "System proxy",
+  "modeTun": "TUN",
+  "profiles": "Profiles"
+}

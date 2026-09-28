@@ -16,6 +16,7 @@ data
 node_modules
 *.db
 *.json
+!v2/hcore/tray/i18n/*.json
 .ci-cache-keys/
 
 # local TestEngine windows regression workdirs

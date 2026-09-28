@@ -1,0 +1,14 @@
+{
+  "showWindow": "Показать окно",
+  "connect": "Подключить",
+  "disconnect": "Отключить",
+  "reconnect": "Переподключить",
+  "quit": "Выход",
+  "connecting": "Подключение…",
+  "disconnecting": "Отключение…",
+  "serviceMode": "Режим сервиса",
+  "modeProxy": "Только прокси",
+  "modeSystemProxy": "Системный прокси",
+  "modeTun": "TUN",
+  "profiles": "Профили"
+}
