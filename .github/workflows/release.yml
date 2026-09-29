@@ -1,12 +1,27 @@
 name: Release
+
+# Tagged release of the prebuilt core libraries (hiddify-lib-* artifacts the
+# app downloads via `make *-prepare` / CORE_URL).
+#
+# Two ways to run:
+# - push a tag v*.*.* (classic);
+# - workflow_dispatch with tag-name (fork repos do not always deliver push
+#   events for tags, so the manual path is the reliable one).
+
 on:
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
       - 'v[0-9]+.[0-9]+.[0-9]+.*'
+  workflow_dispatch:
+    inputs:
+      tag-name:
+        description: 'Release tag to build ("draft" = rolling draft build)'
+        required: true
+        type: string
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ inputs.tag-name || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -16,5 +31,6 @@ jobs:
     permissions: write-all
     with:
       upload-artifact: true
-      tag-name: "${{ github.ref_name }}"
-      channel: "${{ github.ref_type == 'tag' && endsWith(github.ref_name, 'dev') && 'dev' || github.ref_type != 'tag' && 'dev' || 'prod' }}"
+      tag-name: ${{ inputs.tag-name || github.ref_name }}
+      # *.dev tags build against the dev channel; everything else is prod.
+      channel: ${{ endsWith(inputs.tag-name || github.ref_name, 'dev') && 'dev' || 'prod' }}
