@@ -11,13 +11,17 @@ PARENT="$(cd .. && pwd)"
 VENDOR="$PARENT/vendor"
 mkdir -p "$VENDOR"
 
+LX_URL="https://github.com/ne-tort/sing-box-lx.git"
+if [[ -n "${GH_PAT:-}" ]]; then
+  LX_URL="https://x-access-token:${GH_PAT}@github.com/ne-tort/sing-box-lx.git"
+fi
 if [[ ! -d "$VENDOR/sing-box-lx/.git" ]]; then
   echo "Cloning ne-tort/sing-box-lx@$SING_BOX_LX_REF -> $VENDOR/sing-box-lx"
   git clone --filter=blob:none --branch "$SING_BOX_LX_REF" \
-    https://github.com/ne-tort/sing-box-lx.git "$VENDOR/sing-box-lx"
+    "$LX_URL" "$VENDOR/sing-box-lx"
 else
   echo "Updating sing-box-lx to $SING_BOX_LX_REF"
-  git -C "$VENDOR/sing-box-lx" fetch --filter=blob:none origin "$SING_BOX_LX_REF"
+  git -C "$VENDOR/sing-box-lx" fetch --filter=blob:none "$LX_URL" "$SING_BOX_LX_REF"
   git -C "$VENDOR/sing-box-lx" checkout -q FETCH_HEAD
 fi
 git -C "$VENDOR/sing-box-lx" submodule update --init --recursive --depth 1

@@ -30,6 +30,8 @@ jobs:
           fetch-depth: 0
           submodules: recursive
       - name: Bootstrap vendor siblings (sing-box-lx + sing-vmess)
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: bash .github/scripts/bootstrap_vendor.sh
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -133,6 +135,8 @@ jobs:
           submodules: recursive
 
       - name: Bootstrap vendor siblings (sing-box-lx + sing-vmess)
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: bash .github/scripts/bootstrap_vendor.sh
 
       - name: Setup Go
@@ -292,6 +296,8 @@ jobs:
           fetch-depth: 0
           submodules: recursive
       - name: Bootstrap vendor siblings (sing-box-lx + sing-vmess)
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: bash .github/scripts/bootstrap_vendor.sh
       - name: Setup Go
         if: ${{ ! (matrix.legacy_win7 || matrix.legacy_go124) }}
