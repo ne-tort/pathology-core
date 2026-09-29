@@ -83,7 +83,7 @@ windows-amd64: prepare
 	ls -R $(BINDIR)/
 	go install -mod=readonly github.com/akavel/rsrc@latest
 	cp $(BINDIR)/$(LIBNAME).dll ./$(LIBNAME).dll
-	$$(go env GOPATH)/bin/rsrc -ico ./assets/hiddify-cli.ico -o ./cmd/bydll/cli.syso
+	$$(go env GOPATH)/bin/rsrc -ico ./assets/pathology-cli.ico -o ./cmd/bydll/cli.syso
 	env GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc CGO_LDFLAGS="$(LIBNAME).dll" $(GOBUILDSRV) -o $(BINDIR)/$(CLINAME).exe ./cmd/bydll
 	rm -f ./*.dll
 	test -f $(BINDIR)/$(LIBNAME).dll

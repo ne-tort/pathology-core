@@ -41,9 +41,9 @@ if errorlevel 1 (
   exit /b 1
 )
 for /f "delims=" %%G in ('go env GOPATH') do set "GOPATH=%%G"
-"%GOPATH%\bin\rsrc.exe" -ico "%~dp0assets\hiddify-cli.ico" -o "%~dp0cmd\bydll\cli.syso"
+"%GOPATH%\bin\rsrc.exe" -ico "%~dp0assets\pathology-cli.ico" -o "%~dp0cmd\bydll\cli.syso"
 if errorlevel 1 (
-  echo Error: rsrc failed to embed assets\hiddify-cli.ico into cmd\bydll\cli.syso
+  echo Error: rsrc failed to embed assets\pathology-cli.ico into cmd\bydll\cli.syso
   exit /b 1
 )
 copy /Y bin\pathology-core.dll pathology-core.dll >nul
