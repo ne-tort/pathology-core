@@ -33,10 +33,35 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	_ "google.golang.org/grpc/encoding/gzip"
+	"google.golang.org/grpc/keepalive"
 )
 
 type CoreService struct {
 	UnimplementedCoreServer
+}
+
+// grpcKeepaliveOptions tunes the server for the Flutter UI client's
+// keepalive (30s pings, see CoreTransportOptions in the app repo).
+//
+// grpc-go defaults treat any ping sooner than 5 minutes as a policy
+// violation and kill the connection after 2 strikes ("too_many_pings"
+// GOAWAY) — which tore the UI<->core HTTP/2 connection every ~3 minutes,
+// failing in-flight RPCs (session disconnect surfaced as
+// "startFailed - HTTP/2 Connection error") and churning every stream.
+func grpcKeepaliveOptions() []grpc.ServerOption {
+	return []grpc.ServerOption{
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			// UI pings every 30s; anything >= its interval is fine.
+			MinTime: 10 * time.Second,
+			// localhost UI link: pings with no open stream are harmless.
+			PermitWithoutStream: true,
+		}),
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			// Liveness from the server side; generous vs. the client's own pings.
+			Time:    3 * time.Minute,
+			Timeout: 20 * time.Second,
+		}),
+	}
 }
 
 func Setup(params *SetupRequest, platformInterface libbox.PlatformInterface) error {
@@ -151,7 +176,7 @@ func StartGrpcServer(listenAddressG string, service string) (*grpc.Server, error
 		log.Error("failed to listen: %v", err)
 		return nil, err
 	}
-	s := grpc.NewServer()
+	s := grpc.NewServer(grpcKeepaliveOptions()...)
 	if service == "core" {
 		// Setup("./tmp/", "./tmp", "./tmp", 11111, false)
 		RegisterCoreServer(s, &CoreService{})
@@ -211,7 +236,7 @@ func StartGrpcServerByMode(listenAddressG string, mode SetupMode) (*grpc.Server,
 	}
 
 	if mode == SetupMode_GRPC_BACKGROUND_INSECURE || mode == SetupMode_GRPC_NORMAL_INSECURE {
-		grpcServer[mode] = grpc.NewServer()
+		grpcServer[mode] = grpc.NewServer(grpcKeepaliveOptions()...)
 	} else {
 		table := db.GetTable[hcommon.AppSettings]()
 		Log(LogLevel_DEBUG, LogType_CORE, table)
@@ -252,7 +277,7 @@ func StartGrpcServerByMode(listenAddressG string, mode SetupMode) (*grpc.Server,
 
 		// Create a new gRPC server with TLS credentials
 		creds := credentials.NewTLS(tlsConfig)
-		grpcServer[mode] = grpc.NewServer(grpc.Creds(creds))
+		grpcServer[mode] = grpc.NewServer(append(grpcKeepaliveOptions(), grpc.Creds(creds))...)
 	}
 	// Register your gRPC service here
 	RegisterCoreServer(grpcServer[mode], &CoreService{})
