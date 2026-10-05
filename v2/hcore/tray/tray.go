@@ -187,8 +187,14 @@ func refreshTrayDisplay() {
 func handleSession(fn func(context.Context) (*hcore.CoreInfoResponse, error)) {
 	resp, err := fn(context.Background())
 	state := hcore.CurrentCoreState()
-	if msg := hcore.SessionLastErrorMessage(resp, err); msg != "" {
+	msg := hcore.SessionLastErrorMessage(resp, err)
+	// Red tray icon + error tooltip while the last session action failed; both
+	// clear on the next error-free action (the icon also clears on STARTED).
+	setTrayError(msg != "")
+	if msg != "" {
 		systray.SetTooltip("Pathology — " + msg)
+	} else {
+		systray.SetTooltip("Pathology")
 	}
 	refreshConnectionUI(state)
 	if state == hcore.CoreStates_STARTING || state == hcore.CoreStates_STOPPING {

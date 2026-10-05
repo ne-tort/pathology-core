@@ -5,6 +5,7 @@ package tray
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	hcore "github.com/ne-tort/pathology-core/v2/hcore"
@@ -13,10 +14,18 @@ import (
 )
 
 var (
-	trayCtx           context.Context
-	transitionWatchMu sync.Mutex
+	trayCtx            context.Context
+	transitionWatchMu  sync.Mutex
 	transitionWatching bool
 )
+
+// trayErrorState marks the last session action as failed. While the core is
+// STOPPED with this flag set the tray shows the red icon (error); it clears on
+// the next error-free action or any STARTED transition. Atomic: written from
+// menu goroutines, read on the tray UI goroutine.
+var trayErrorState atomic.Bool
+
+func setTrayError(hasError bool) { trayErrorState.Store(hasError) }
 
 // transitionPollCeiling bounds how long watchCoreTransitions will poll STARTING/
 // STOPPING before giving up. Without a ceiling, a stuck core state (Start that
@@ -31,13 +40,19 @@ func applyTrayIcon(state hcore.CoreStates, darkTheme bool) {
 	var icon []byte
 	switch state {
 	case hcore.CoreStates_STARTED:
+		trayErrorState.Store(false)
 		icon = trayIconConnected
 	case hcore.CoreStates_STARTING, hcore.CoreStates_STOPPING:
 		icon = trayIconConnecting
 	default:
-		if darkTheme {
+		switch {
+		case trayErrorState.Load():
+			// Stopped after a failed session action: red-on-black error icon
+			// (same asset as the transition red; semantics via state).
+			icon = trayIconConnecting
+		case darkTheme:
 			icon = trayIconDark
-		} else {
+		default:
 			icon = trayIconDisconnected
 		}
 	}
