@@ -81,7 +81,14 @@ func Setup(params *SetupRequest, platformInterface libbox.PlatformInterface) err
 		return nil
 	}
 	static.debug = params.Debug
-	static.globalPlatformInterface = platformInterface
+	// Never downgrade a registered platform to nil: Android sets up the fg core
+	// (mode 3) and the VPN-service core (mode 4) in one process, and a later
+	// nil-platform Setup must not strip the wrapper from the shared BaseContext —
+	// without it sing-box falls back to the netlink monitor, which Google bans
+	// for apps, and every box start dies with ErrNetlinkBanned.
+	if platformInterface != nil {
+		static.globalPlatformInterface = platformInterface
+	}
 	tcpConn := true // runtime.GOOS == "windows" // TODO add TVOS
 	libbox.Setup(
 		&libbox.SetupOptions{
@@ -101,7 +108,7 @@ func Setup(params *SetupRequest, platformInterface libbox.PlatformInterface) err
 	// BaseContext must be built AFTER libbox.Setup so filemanager gets real
 	// working/temp paths and uid/gid. Creating it earlier leaves chown=true with
 	// uid 0 on Windows (Getuid()==-1) → "chown ... not supported by windows".
-	static.BaseContext = libbox.BaseContext(platformInterface)
+	static.BaseContext = libbox.BaseContext(static.globalPlatformInterface)
 
 	// Setup() already pointed crash output at CrashReport-*.log; override with a
 	// mode-specific path under data/ (uses LX libbox.RedirectStderr + archive).
