@@ -967,6 +967,14 @@ func setRoutingOptions(options *option.Options, input *option.Options, hopt *Cli
 	}
 
 	strategy := defaultNetworkStrategyForIPv6Mode(hopt.IPv6Mode)
+	// sing-box hard-requires auto_detect_interface whenever default_network_strategy
+	// is set (route/network.go). On mobile the OS binds sockets to networks itself,
+	// and enabling auto-detect on the main TUN risks binding outbound to our own
+	// tunnel — so drop the strategy on mobile instead. TestMode keeps both (the
+	// side box needs auto_detect_interface to run ProtectFunc under an active VPN).
+	if C.IsAndroid || C.IsIos {
+		strategy = nil
+	}
 	// sing-box requires auto_detect_interface whenever default_network_strategy is set.
 	// Android/iOS normally skip this for main TUN (platform owns routing); TestMode side
 	// box must enable it so ProtectFunc / auto_detect_interface_control runs under VPN.
