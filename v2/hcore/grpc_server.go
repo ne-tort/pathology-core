@@ -349,6 +349,21 @@ func CloseGrpcServer(mode SetupMode) {
 	}
 }
 
+// anyGrpcServerAlive reports whether any mode's gRPC server is still serving.
+// Android runs the fg and bg modes in ONE process: the shared LevelDB must
+// stay open while any mode can still receive RPCs — db.CloseAll under a live
+// server panics the next RPC goroutine and takes the whole process down.
+func anyGrpcServerAlive() bool {
+	mu.Lock()
+	defer mu.Unlock()
+	for _, s := range grpcServer {
+		if s != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // ezytelCacheDir keeps ezytel under Setup TempDir (portable_data/tmp) instead of os.TempDir.
 func ezytelCacheDir() string {
 	if sTempPath != "" {

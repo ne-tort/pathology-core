@@ -13,6 +13,17 @@ func errorWrapper(state MessageType, err error) (*CoreInfoResponse, error) {
 	return SetCoreStatus(CoreStates_STOPPED, state, err.Error()), err
 }
 
+// closeDbIfIdle closes the shared LevelDB only when no gRPC mode can still
+// serve RPCs on it. Android hosts the fg and bg modes in ONE process, so an
+// unconditional db.CloseAll (service stop from the notification) leaves the
+// live mode's next RPC touching a closed database — a process-killing panic.
+func closeDbIfIdle() {
+	if anyGrpcServerAlive() {
+		return
+	}
+	_ = db.CloseAll()
+}
+
 func StopAndAlert(msgType MessageType, message string) {
 	SetCoreStatus(CoreStates_STOPPED, msgType, message)
 
@@ -21,7 +32,7 @@ func StopAndAlert(msgType MessageType, message string) {
 		ss.CloseService()
 		static.StartedService = nil
 	}
-	_ = db.CloseAll()
+	closeDbIfIdle()
 }
 
 func Close(mode SetupMode) error {
@@ -33,7 +44,7 @@ func Close(mode SetupMode) error {
 
 	_, err := Stop()
 	CloseGrpcServer(mode)
-	_ = db.CloseAll()
+	closeDbIfIdle()
 
 	return err
 }
