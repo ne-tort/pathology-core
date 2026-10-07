@@ -37,8 +37,8 @@ protos:
 
 
 lib_install: prepare
-	go install -v github.com/sagernet/gomobile/cmd/gomobile@v0.1.11
-	go install -v github.com/sagernet/gomobile/cmd/gobind@v0.1.11
+	go install -v github.com/sagernet/gomobile/cmd/gomobile@v0.1.12
+	go install -v github.com/sagernet/gomobile/cmd/gobind@v0.1.12
 	# Optional: webui/extension protobuf tooling. Android CI sets SKIP_CORE_NPM=1.
 	if [ "$${SKIP_CORE_NPM}" != "1" ]; then npm install; fi
 

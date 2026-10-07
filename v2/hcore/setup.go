@@ -20,13 +20,15 @@ func InitPathologyService() error {
 }
 
 func (s *CoreService) Setup(ctx context.Context, req *SetupRequest) (*hcommon.Response, error) {
-	if grpcServer[req.Mode] != nil {
+	if hasGrpcServer(req.Mode) {
 		return &hcommon.Response{Code: hcommon.ResponseCode_OK, Message: ""}, nil
 	}
 	err := Setup(req, nil)
 	code := hcommon.ResponseCode_OK
+	message := ""
 	if err != nil {
 		code = hcommon.ResponseCode_FAILED
+		message = err.Error()
 	}
-	return &hcommon.Response{Code: code, Message: err.Error()}, err
+	return &hcommon.Response{Code: code, Message: message}, err
 }

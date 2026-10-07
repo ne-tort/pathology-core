@@ -4,6 +4,7 @@ package monitoring
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -132,6 +133,13 @@ func (m *OutboundMonitoring) relayHistoryUpdates() {
 	if m == nil || m.hook == nil || m.events == nil {
 		return
 	}
+	// Containment: the relay lives as long as the box; a panic here (observable
+	// races during teardown) would abort the in-process Android app.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("monitoring: relayHistoryUpdates panic: %v", r)
+		}
+	}()
 	observer := observable.NewObserver(m.hook, 4)
 	ch, done, err := observer.Subscribe()
 	if err != nil {
@@ -266,6 +274,18 @@ func (m *OutboundMonitoring) testGroupLeaves(parent context.Context, group adapt
 	for _, l := range leaves {
 		leaf := l
 		b.Go(leaf.tag, func() (any, error) {
+			// Containment: batch runs closures on bare goroutines; an unrecovered
+			// panic in dialer code aborts the whole in-process Android app.
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("monitoring: probe panic tag=%s: %v", leaf.tag, r)
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("probe panic on %s: %v", leaf.tag, r)
+					}
+					mu.Unlock()
+				}
+			}()
 			err := m.testDialer(parent, leaf.dialer, leaf.source)
 			if err != nil {
 				mu.Lock()
@@ -390,6 +410,14 @@ func (m *OutboundMonitoring) raceURLs(parent context.Context, dialer N.Dialer, u
 	for _, u := range urls {
 		link := u
 		go func() {
+			// Contained: a panic in urltest/protocol code on this bare goroutine
+			// would abort the whole in-process app (Android single-process core).
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("monitoring: race probe panic url=%s: %v", link, r)
+					ch <- result{err: fmt.Errorf("probe panic: %v", r)}
+				}
+			}()
 			d, err := urltest.URLTest(raceCtx, link, dialer)
 			ch <- result{delay: d, err: err}
 		}()

@@ -9,8 +9,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ne-tort/pathology-core/compat/monitoring"
@@ -48,6 +50,13 @@ type SideStarter func(ctx context.Context, options option.Options) (*daemon.Star
 type Engine struct {
 	mu sync.Mutex
 
+	// opMu serializes side-box lifecycle operations (Ensure/Stop). Without it
+	// two concurrent Ensure calls could build two boxes and race for the slot
+	// ("test engine slot taken"), and a Stop could tear the box down mid-build.
+	// Ping does NOT take it: probes are fenced by pingsInFlight and must stay
+	// parallel (profile-wide test fans out 3+ concurrent RPCs).
+	opMu sync.Mutex
+
 	deps Deps
 
 	profileID   string
@@ -70,21 +79,46 @@ type Engine struct {
 
 // Deps wires Engine to the main PathologyInstance without importing hcore (cycle).
 // Installed atomically via Configure (Setup only); Ensure/Ping snapshot a copy.
+//
+// BaseContext/Platform are GETTERS: Android re-resolves the shared platform and
+// BaseContext on every Setup/Close (bg VPNService wrapper vs fg wrapper), so
+// captured values go stale — a side box built after the VPN service died used
+// to keep dialing JNI methods on a destroyed Kotlin service.
 type Deps struct {
-	BaseContext  context.Context
-	Platform     libbox.PlatformInterface
+	BaseContext  func() context.Context
+	Platform     func() libbox.PlatformInterface
 	WorkingDir   string
 	CloneOptions func() (*config.ClientOptions, error)
 	StartSide    SideStarter
+	// Log routes engine diagnostics into the core log (visible on Android via
+	// the LogListener stream / stderr files). std log.Printf on Android goes to
+	// /dev/null — the engine was effectively silent in device artifacts.
+	Log func(msg string)
 }
 
 var global = &Engine{}
+
+// logFn is the Configure-installed core logger (atomic: read from probe
+// goroutines without holding e.mu).
+var logFn atomic.Pointer[func(string)]
+
+func elogf(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	if p := logFn.Load(); p != nil {
+		(*p)(msg)
+		return
+	}
+	log.Printf("testengine: %s", msg)
+}
 
 // Configure installs process-wide dependencies (Setup only — not per Ensure).
 func Configure(d Deps) {
 	global.mu.Lock()
 	defer global.mu.Unlock()
 	global.deps = d
+	if d.Log != nil {
+		logFn.Store(&d.Log)
+	}
 }
 
 func (e *Engine) snapshotDeps() Deps {
@@ -133,8 +167,19 @@ func (e *Engine) Ensure(ctx context.Context, profileID, configPath string, allow
 	deps := e.snapshotDeps()
 	allowKey := strings.Join(allowlist, "\x1f")
 
+	// Serialize side-box lifecycle: two concurrent Ensures must not both build
+	// (slot-taken abort) and an Ensure must not overlap a Stop teardown.
+	e.opMu.Lock()
+	defer e.opMu.Unlock()
+
 	e.mu.Lock()
-	if e.canReuseLocked(profileID, configPath, stamp) && e.allowlistKey == allowKey {
+	// Reuse when the running box already covers the request: same profile/config
+	// AND (identical allowlist OR every requested tag is already a built leaf).
+	// The subset rule removes the swap-on-every-ping behavior — a single ping
+	// after a profile ping (or after another single ping when the client sends
+	// the full leaf set) no longer tears the side box down under in-flight work.
+	if e.canReuseLocked(profileID, configPath, stamp) &&
+		(e.allowlistKey == allowKey || e.allowlistCoveredLocked(allowlist)) {
 		e.touchLocked()
 		resp := &EnsureResponse{
 			ProfileID: e.profileID,
@@ -148,7 +193,7 @@ func (e *Engine) Ensure(ctx context.Context, profileID, configPath string, allow
 	e.mu.Unlock()
 
 	if err := closeSideService(old, &e.pingsInFlight, closeWaitBudget); err != nil {
-		log.Printf("testengine: stop previous side box: %v", err)
+		elogf("stop previous side box: %v", err)
 		return nil, status.Errorf(codes.Aborted, "stop previous: %v", err)
 	}
 
@@ -202,7 +247,7 @@ func (e *Engine) Ensure(ctx context.Context, profileID, configPath string, allow
 		port, perr := readMixedListenPort(svc)
 		if perr != nil {
 			if cerr := closeSideService(svc, nil, closeWaitBudget); cerr != nil {
-				log.Printf("testengine: close after mixed-port read fail: %v", cerr)
+				elogf("close after mixed-port read fail: %v", cerr)
 			}
 			lastErr = perr
 			continue
@@ -212,10 +257,11 @@ func (e *Engine) Ensure(ctx context.Context, profileID, configPath string, allow
 		if e.service != nil {
 			e.mu.Unlock()
 			if cerr := closeSideService(svc, nil, closeWaitBudget); cerr != nil {
-				log.Printf("testengine: close raced side box: %v", cerr)
+				elogf("close raced side box: %v", cerr)
 			}
 			e.mu.Lock()
-			if e.canReuseLocked(profileID, configPath, stamp) && e.allowlistKey == allowKey {
+			if e.canReuseLocked(profileID, configPath, stamp) &&
+				(e.allowlistKey == allowKey || e.allowlistCoveredLocked(allowlist)) {
 				resp := &EnsureResponse{
 					ProfileID: e.profileID,
 					MixedPort: e.mixedPort,
@@ -250,14 +296,16 @@ func (e *Engine) Ensure(ctx context.Context, profileID, configPath string, allow
 // Stop closes the side instance if running.
 func (e *Engine) Stop(ctx context.Context) error {
 	_ = ctx
+	e.opMu.Lock()
+	defer e.opMu.Unlock()
 	e.mu.Lock()
 	old := e.takeServiceLocked()
 	e.mu.Unlock()
 	err := closeSideService(old, &e.pingsInFlight, closeWaitBudget)
 	if err != nil {
-		log.Printf("testengine: Stop CloseService: %v", err)
+		elogf("Stop CloseService: %v", err)
 	} else if old != nil {
-		log.Printf("testengine: side stop done")
+		elogf("side stop done")
 	}
 	return err
 }
@@ -320,6 +368,22 @@ func (e *Engine) Ping(ctx context.Context, profileID, outboundTag, strategy, tes
 	for i, tag := range tags {
 		i, tag := i, tag
 		bch.Go(fmt.Sprintf("%d:%s", i, tag), func() (any, error) {
+			// Probe containment: sing's batch runs closures on bare goroutines —
+			// an unrecovered panic in dialer/urltest code (protocol plugins,
+			// JNI-backed platform calls on Android) would abort the whole
+			// in-process app. A dead probe is a failed result, not a dead client.
+			defer func() {
+				if r := recover(); r != nil {
+					elogf("probe panic tag=%s: %v\n%s", tag, r, debug.Stack())
+					results[i] = PingResult{
+						Tag:          tag,
+						Samples:      int32(samples),
+						Failed:       true,
+						FailRate:     1,
+						ErrorMessage: fmt.Sprintf("probe panic: %v", r),
+					}
+				}
+			}()
 			results[i] = probeTagBounded(parent, b, tag, testURL, samples)
 			return nil, nil
 		})
@@ -362,6 +426,21 @@ func (e *Engine) canReuseLocked(profileID, configPath, stamp string) bool {
 		e.profileID == profileID &&
 		e.configPath == configPath &&
 		e.configStamp == stamp
+}
+
+// allowlistCoveredLocked reports whether every requested tag is already a built
+// leaf of the running side box — then no rebuild is needed even though the
+// allowlist key differs (single-tag ping against a full-profile box).
+func (e *Engine) allowlistCoveredLocked(allowlist []string) bool {
+	if e.service == nil || len(e.leafTags) == 0 {
+		return false
+	}
+	for _, t := range allowlist {
+		if !containsString(e.leafTags, t) {
+			return false
+		}
+	}
+	return true
 }
 
 // resetProbeCtxLocked installs a fresh probe cancel scope for the new side box.
@@ -432,10 +511,21 @@ func closeSideService(svc *daemon.StartedService, pings *sync.WaitGroup, wait ti
 		select {
 		case <-done:
 		case <-time.After(wait):
-			log.Printf("testengine: wait for in-flight probes timed out after %v", wait)
+			elogf("wait for in-flight probes timed out after %v", wait)
 		}
 	}
-	err := svc.CloseService()
+	// Contained close: CloseService tears down gvisor/mixed inbound/protocol
+	// clients — a panic there (e.g. use-after-close racing a stuck probe) must
+	// surface as an error, not abort the in-process app.
+	err := func() (cerr error) {
+		defer func() {
+			if r := recover(); r != nil {
+				elogf("CloseService panic: %v\n%s", r, debug.Stack())
+				cerr = fmt.Errorf("CloseService panic: %v", r)
+			}
+		}()
+		return svc.CloseService()
+	}()
 	if err == nil || errors.Is(err, os.ErrInvalid) {
 		return nil
 	}
@@ -521,13 +611,20 @@ func sideStart(deps Deps, ctx context.Context, options option.Options) (*daemon.
 }
 
 func serviceContext(deps Deps) context.Context {
-	ctx := deps.BaseContext
+	var ctx context.Context
+	if deps.BaseContext != nil {
+		ctx = deps.BaseContext()
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	var platform libbox.PlatformInterface
+	if deps.Platform != nil {
+		platform = deps.Platform()
+	}
 	// Always refresh filemanager (paths + uid), same as Core.StartService.
 	// Stale BaseContext from before Setup enables chown on Windows and fails.
-	return libbox.FromContext(ctx, deps.Platform)
+	return libbox.FromContext(ctx, platform)
 }
 
 func normalizeAllowlist(tags []string) []string {
@@ -661,6 +758,14 @@ func (e *Engine) startIdleWatchLocked() {
 	e.idleCancel = cancel
 	deadline := e.lastActive.Add(IdleTimeout)
 	go func() {
+		// Containment: this goroutine closes the side box on a timer — a panic
+		// here (teardown races) would abort the in-process app with no RPC to
+		// blame it on.
+		defer func() {
+			if r := recover(); r != nil {
+				elogf("idle watch panic: %v\n%s", r, debug.Stack())
+			}
+		}()
 		timer := time.NewTimer(time.Until(deadline))
 		defer timer.Stop()
 		select {
@@ -680,9 +785,9 @@ func (e *Engine) startIdleWatchLocked() {
 			old := e.takeServiceLocked()
 			e.mu.Unlock()
 			if err := closeSideService(old, &e.pingsInFlight, closeWaitBudget); err != nil {
-				log.Printf("testengine: idle CloseService: %v", err)
+				elogf("idle CloseService: %v", err)
 			} else if old != nil {
-				log.Printf("testengine: side idle stop done")
+				elogf("side idle stop done")
 			}
 		}
 	}()
@@ -979,6 +1084,15 @@ func raceProbeURLs(parent context.Context, dialer N.Dialer, urls []string) (uint
 	for _, u := range urls {
 		link := u
 		go func() {
+			// Contained: URLTest dials run protocol-plugin code (reality/mux/…)
+			// and JNI-backed platform hooks on Android; a panic on this bare
+			// goroutine would abort the whole in-process app.
+			defer func() {
+				if r := recover(); r != nil {
+					elogf("probe race panic url=%s: %v\n%s", link, r, debug.Stack())
+					ch <- result{err: fmt.Errorf("probe panic: %v", r)}
+				}
+			}()
 			d, err := urltest.URLTest(raceCtx, link, dialer)
 			ch <- result{delay: d, err: err}
 		}()

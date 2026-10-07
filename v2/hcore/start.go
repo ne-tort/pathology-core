@@ -21,7 +21,7 @@ import (
 )
 
 func (s *CoreService) Start(ctx context.Context, in *StartRequest) (*CoreInfoResponse, error) {
-	return Start(static.BaseContext, in)
+	return Start(static.baseContext(), in)
 }
 
 func Start(ctx context.Context, in *StartRequest) (*CoreInfoResponse, error) {
@@ -109,7 +109,7 @@ func StartService(ctx context.Context, in *StartRequest) (coreResponse *CoreInfo
 		)
 	}
 
-	ctx = libbox.FromContext(ctx, static.globalPlatformInterface)
+	ctx = libbox.FromContext(ctx, static.platform())
 	options, err := BuildConfig(ctx, in)
 	if err != nil {
 		return errorWrapper(MessageType_ERROR_BUILDING_CONFIG, err)
@@ -131,7 +131,7 @@ func StartService(ctx context.Context, in *StartRequest) (coreResponse *CoreInfo
 		}
 		Log(LogLevel_INFO, LogType_CORE, "Current Config is:\n", string(pout))
 	}
-	ctx = libbox.FromContext(ctx, static.globalPlatformInterface)
+	ctx = libbox.FromContext(ctx, static.platform())
 	Log(LogLevel_DEBUG, LogType_CORE, "Stating Service with delay ?", in.DelayStart)
 	if in.DelayStart {
 		<-time.After(1000 * time.Millisecond)

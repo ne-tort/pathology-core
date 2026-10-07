@@ -76,19 +76,23 @@ func Setup(params *SetupRequest, platformInterface libbox.PlatformInterface) err
 	}
 	mu.Lock()
 	defer mu.Unlock()
+	// Register this mode's platform BEFORE the early return below: a re-Setup
+	// over a live server (Android bg start after an fg setup, resume flows) must
+	// still (re-)resolve the shared platform, or the next box start keeps a
+	// stale/downgraded interface. Never downgrades to nil (v4.3.9 netlink fix);
+	// background modes win over foreground (resolvePlatformLocked).
+	static.setPlatformForMode(params.Mode, platformInterface)
 	if grpcServer[params.Mode] != nil {
+		// Server already serving: refresh the shared context/TestEngine deps so
+		// later box starts see the re-resolved platform, then no-op.
+		if static.baseContext() != nil {
+			static.setBaseContext(libbox.BaseContext(static.platform()))
+			configureTestEngine()
+		}
 		Log(LogLevel_WARNING, LogType_CORE, "grpcServer already started")
 		return nil
 	}
 	static.debug = params.Debug
-	// Never downgrade a registered platform to nil: Android sets up the fg core
-	// (mode 3) and the VPN-service core (mode 4) in one process, and a later
-	// nil-platform Setup must not strip the wrapper from the shared BaseContext —
-	// without it sing-box falls back to the netlink monitor, which Google bans
-	// for apps, and every box start dies with ErrNetlinkBanned.
-	if platformInterface != nil {
-		static.globalPlatformInterface = platformInterface
-	}
 	tcpConn := true // runtime.GOOS == "windows" // TODO add TVOS
 	libbox.Setup(
 		&libbox.SetupOptions{
@@ -108,7 +112,7 @@ func Setup(params *SetupRequest, platformInterface libbox.PlatformInterface) err
 	// BaseContext must be built AFTER libbox.Setup so filemanager gets real
 	// working/temp paths and uid/gid. Creating it earlier leaves chown=true with
 	// uid 0 on Windows (Getuid()==-1) → "chown ... not supported by windows".
-	static.BaseContext = libbox.BaseContext(static.globalPlatformInterface)
+	static.setBaseContext(libbox.BaseContext(static.platform()))
 
 	// Setup() already pointed crash output at CrashReport-*.log; override with a
 	// mode-specific path under data/ (uses LX libbox.RedirectStderr + archive).
@@ -183,7 +187,7 @@ func StartGrpcServer(listenAddressG string, service string) (*grpc.Server, error
 		log.Error("failed to listen: %v", err)
 		return nil, err
 	}
-	s := grpc.NewServer(grpcKeepaliveOptions()...)
+	s := grpc.NewServer(append(grpcKeepaliveOptions(), grpcRecoveryOptions()...)...)
 	if service == "core" {
 		// Setup("./tmp/", "./tmp", "./tmp", 11111, false)
 		RegisterCoreServer(s, &CoreService{})
@@ -243,7 +247,7 @@ func StartGrpcServerByMode(listenAddressG string, mode SetupMode) (*grpc.Server,
 	}
 
 	if mode == SetupMode_GRPC_BACKGROUND_INSECURE || mode == SetupMode_GRPC_NORMAL_INSECURE {
-		grpcServer[mode] = grpc.NewServer(grpcKeepaliveOptions()...)
+		grpcServer[mode] = grpc.NewServer(append(grpcKeepaliveOptions(), grpcRecoveryOptions()...)...)
 	} else {
 		table := db.GetTable[hcommon.AppSettings]()
 		Log(LogLevel_DEBUG, LogType_CORE, table)
@@ -284,7 +288,8 @@ func StartGrpcServerByMode(listenAddressG string, mode SetupMode) (*grpc.Server,
 
 		// Create a new gRPC server with TLS credentials
 		creds := credentials.NewTLS(tlsConfig)
-		grpcServer[mode] = grpc.NewServer(append(grpcKeepaliveOptions(), grpc.Creds(creds))...)
+		mtlsOpts := append(grpcKeepaliveOptions(), grpcRecoveryOptions()...)
+		grpcServer[mode] = grpc.NewServer(append(mtlsOpts, grpc.Creds(creds))...)
 	}
 	// Register your gRPC service here
 	RegisterCoreServer(grpcServer[mode], &CoreService{})
@@ -299,13 +304,26 @@ func StartGrpcServerByMode(listenAddressG string, mode SetupMode) (*grpc.Server,
 	Log(LogLevel_DEBUG, LogType_CORE, fmt.Sprintf("grpcServer started on %s\n", listenAddressG))
 	log.Info("Server listening on %s", listenAddressG)
 
-	// Run the server in a goroutine
+	// Run the server in a goroutine. Capture the instance: reading
+	// grpcServer[mode] here raced with Close (unsynchronized map read), and a
+	// Serve that dies on its own left a zombie map entry — every later Setup
+	// short-circuited on "already started" while nothing was listening
+	// (connection-refused until process restart). Clean the entry on exit so
+	// the next Setup rebinds.
+	srv := grpcServer[mode]
 	go func() {
-		defer config.DeferPanicToError("grpcsetup", func(err error) {
-			Log(LogLevel_FATAL, LogType_CORE, err.Error())
-			<-time.After(5 * time.Second)
-		})
-		if err := grpcServer[mode].Serve(lis); err != nil {
+		defer func() {
+			if r := recover(); r != nil {
+				logRecoveredPanic(fmt.Sprintf("grpc.Serve(mode=%d)", mode), r)
+			}
+			mu.Lock()
+			if cur, ok := grpcServer[mode]; ok && cur == srv {
+				delete(grpcServer, mode)
+				Log(LogLevel_WARNING, LogType_CORE, fmt.Sprintf("grpc serve exited; cleared mode %d so Setup can rebind", mode))
+			}
+			mu.Unlock()
+		}()
+		if err := srv.Serve(lis); err != nil {
 			Log(LogLevel_DEBUG, LogType_CORE, fmt.Sprintf("failed to serve: %v\n", err))
 		}
 		Log(LogLevel_DEBUG, LogType_CORE, "Server stopped")
@@ -315,8 +333,23 @@ func StartGrpcServerByMode(listenAddressG string, mode SetupMode) (*grpc.Server,
 }
 
 // GetGrpcServerPublicKey returns the gRPC server's public key.
+// Nil-safe: certpair is only generated in the mTLS modes — Android/desktop
+// run the insecure modes, and a nil deref here would abort the whole app
+// process (c-shared/JNI export path via Mobile.getServerPublicKey).
 func GetGrpcServerPublicKey() []byte {
+	if certpair == nil {
+		return nil
+	}
 	return certpair.Certificate
+}
+
+// hasGrpcServer reports whether mode's server is registered (mu-guarded —
+// Setup/Close mutate the map; bare reads from RPC handlers race with them and
+// can trigger "concurrent map read and map write" = unrecoverable throw).
+func hasGrpcServer(mode SetupMode) bool {
+	mu.Lock()
+	defer mu.Unlock()
+	return grpcServer[mode] != nil
 }
 
 // AddGrpcClientPublicKey adds a client's public key to the CA pool for verification.
@@ -346,6 +379,15 @@ func CloseGrpcServer(mode SetupMode) {
 	if server, ok := grpcServer[mode]; ok && server != nil {
 		server.Stop()
 		delete(grpcServer, mode)
+	}
+	// The closed mode's platform no longer represents a live service: re-resolve
+	// the shared interface (e.g. bg VPNService wrapper gone → fg wrapper takes
+	// over) and refresh BaseContext/TestEngine deps so the next box start on the
+	// surviving mode does not keep a destroyed Kotlin service as its platform.
+	static.dropPlatformForMode(mode)
+	if static.baseContext() != nil {
+		static.setBaseContext(libbox.BaseContext(static.platform()))
+		configureTestEngine()
 	}
 }
 

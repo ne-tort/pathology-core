@@ -9,6 +9,12 @@ import (
 	"github.com/sagernet/sing-box/experimental/libbox"
 )
 
+// Every function in this package crosses the gomobile/JNI boundary on Android,
+// where the core shares ONE process with the Flutter UI: a panic that unwinds
+// into the generated binding aborts the whole app. Each export therefore starts
+// with a recover (hcore.RecoverExport*) so a core fault degrades to an error /
+// no-op with the stack captured in stderr*.log instead of killing the client.
+
 type SetupOptions struct {
 	BasePath         string
 	WorkingDir       string
@@ -21,8 +27,9 @@ type SetupOptions struct {
 	OomKillerEnabled bool
 }
 
-func Setup(opt *SetupOptions, platformInterface libbox.PlatformInterface) error {
-	if err := hcore.Setup(&hcore.SetupRequest{
+func Setup(opt *SetupOptions, platformInterface libbox.PlatformInterface) (err error) {
+	defer hcore.RecoverExportErr("Setup", &err)
+	if err = hcore.Setup(&hcore.SetupRequest{
 		BasePath:          opt.BasePath,
 		WorkingDir:        opt.WorkingDir,
 		TempDir:           opt.TempDir,
@@ -51,28 +58,33 @@ func Setup(opt *SetupOptions, platformInterface libbox.PlatformInterface) error 
 // 	return state, err
 // }
 
-func Start(configPath string, configContent string) error {
-	_, err := hcore.StartService(libbox.BaseContext(nil), &hcore.StartRequest{
+func Start(configPath string, configContent string) (err error) {
+	defer hcore.RecoverExportErr("Start", &err)
+	_, err = hcore.StartService(libbox.BaseContext(nil), &hcore.StartRequest{
 		ConfigPath:    configPath,
 		ConfigContent: configContent,
 	})
 	return err
 }
 
-func Stop() error {
-	_, err := hcore.Stop()
+func Stop() (err error) {
+	defer hcore.RecoverExportErr("Stop", &err)
+	_, err = hcore.Stop()
 	return err
 }
 
-func GetServerPublicKey() []byte {
+func GetServerPublicKey() (out []byte) {
+	defer hcore.RecoverExport("GetServerPublicKey")
 	return hcore.GetGrpcServerPublicKey()
 }
 
-func AddGrpcClientPublicKey(clientPublicKey []byte) error {
+func AddGrpcClientPublicKey(clientPublicKey []byte) (err error) {
+	defer hcore.RecoverExportErr("AddGrpcClientPublicKey", &err)
 	return hcore.AddGrpcClientPublicKey(clientPublicKey)
 }
 
 func Close(mode int) {
+	defer hcore.RecoverExport("Close")
 	hcore.Close(hcore.SetupMode(mode))
 }
 
@@ -81,13 +93,16 @@ func Test() string {
 }
 
 func Pause() {
+	defer hcore.RecoverExport("Pause")
 	hcore.Pause()
 }
 
 func Wake() {
+	defer hcore.RecoverExport("Wake")
 	hcore.Wake()
 }
 
 func ResetNetwork() {
+	defer hcore.RecoverExport("ResetNetwork")
 	hcore.ResetNetwork()
 }

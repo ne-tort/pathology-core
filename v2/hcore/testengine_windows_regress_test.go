@@ -72,7 +72,7 @@ func TestTestEngineEnsureStartsSideBoxOnWindows(t *testing.T) {
 
 	opt := config.DefaultClientOptions()
 	testengine.Configure(testengine.Deps{
-		BaseContext: base,
+		BaseContext: func() context.Context { return base },
 		WorkingDir:  work,
 		CloneOptions: func() (*config.ClientOptions, error) {
 			return config.CloneClientOptions(opt)

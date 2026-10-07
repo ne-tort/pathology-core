@@ -104,10 +104,15 @@ func (h *PathologyInstance) GetAllProxiesInfo(hismap map[string]*adapter.URLTest
 
 	outbounds_converted := make(map[string]*OutboundInfo, 0)
 	var iGroups []adapter.OutboundGroup
+	// ONE snapshot of the outbound list: two separate box.Outbound().Outbounds()
+	// reads could observe different box generations mid-rebuild, and every
+	// group member below must exist in the converted map (a miss used to be a
+	// nil deref in the stream goroutine — a whole-app crash on Android).
+	outboundsList := box.Outbound().Outbounds()
 	for _, it := range box.Endpoint().Endpoints() {
 		outbounds_converted[it.Tag()] = h.GetProxyInfo(h.historyForDetour(hismap, it), it)
 	}
-	for _, it := range box.Outbound().Outbounds() {
+	for _, it := range outboundsList {
 		outbounds_converted[it.Tag()] = h.GetProxyInfo(h.historyForDetour(hismap, it), it)
 	}
 	for _, it := range outbounds_converted {
@@ -119,7 +124,7 @@ func (h *PathologyInstance) GetAllProxiesInfo(hismap map[string]*adapter.URLTest
 			it.Type += " → " + det.Type
 		}
 	}
-	for _, it := range box.Outbound().Outbounds() {
+	for _, it := range outboundsList {
 		if group, isGroup := it.(adapter.OutboundGroup); isGroup {
 			iGroups = append(iGroups, group)
 
@@ -157,6 +162,14 @@ func (h *PathologyInstance) GetAllProxiesInfo(hismap map[string]*adapter.URLTest
 				continue
 			}
 			pinfo := outbounds_converted[itemTag]
+			if pinfo == nil {
+				// Group member absent from the converted map (pruned/filtered
+				// leaf, endpoint-vs-outbound mismatch, or a box swap racing this
+				// recompute). Skip it — a nil deref here panics the stream
+				// goroutine and kills the whole Android app process.
+				Log(LogLevel_WARNING, LogType_CORE, "GetAllProxiesInfo: group member missing from converted outbounds: ", itemTag)
+				continue
+			}
 			pinfo.IsSelected = itemTag == selectedTag
 			if onlyGroupitems && pinfo.GroupSelectedTagDisplay != nil && pinfo.TagDisplay != *pinfo.GroupSelectedTagDisplay {
 				pinfo.TagDisplay = pinfo.TagDisplay + " → " + *pinfo.GroupSelectedTagDisplay

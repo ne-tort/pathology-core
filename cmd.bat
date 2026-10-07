@@ -9,4 +9,4 @@ if not defined TAGS (
   echo Error: could not read TAGS from build_tags.txt
   exit /b 1
 )
-go run --tags %TAGS% ./cli %*
+go run --tags %TAGS% ./cmd/main %*
