@@ -23,6 +23,7 @@ func (h *PathologyInstance) readStatus(prev *SystemInfo) *SystemInfo {
 	var message SystemInfo
 	message.Memory = int64(memory.Inuse())
 	message.Goroutines = int32(runtime.NumGoroutine())
+	message.StartedAtMs = h.startedAtMs.Load()
 	// message.ConnectionsOut = int32(conntrack.Count())
 
 	if ss := h.StartedService; ss != nil {
@@ -46,11 +47,18 @@ func (h *PathologyInstance) readStatus(prev *SystemInfo) *SystemInfo {
 			}
 			// if message.CurrentOutbound == config.OutboundURLTestTag {
 			if currentOutBound, ok := box.Outbound().Outbound(current); ok {
+				leaf := currentOutBound
 				if g, ok := currentOutBound.(adapter.OutboundGroup); ok {
 					if now := g.Now(); now != "" {
 						message.CurrentOutbound = fmt.Sprint(message.CurrentOutbound, "→", TrimTagName(now))
+						if next, ok := box.Outbound().Outbound(now); ok {
+							leaf = next
+						}
 					}
 				}
+				// Protocol type of the FINAL leaf (e.g. "hysteria2") — the
+				// Android notification shows it instead of tags/profile.
+				message.CurrentOutboundType = leaf.Type()
 			}
 			// }
 		}

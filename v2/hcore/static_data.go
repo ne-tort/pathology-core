@@ -3,6 +3,7 @@ package hcore
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ne-tort/pathology-core/v2/config"
@@ -39,6 +40,11 @@ type PathologyInstance struct {
 	ListenPort                uint16
 	BaseContext               context.Context
 	endPauseTimer             *time.Timer // only for ios
+	// startedAtMs is the Unix-millis moment CoreState entered STARTED (true
+	// tunnel/service start). It lives in the core process (bg service on
+	// Android, Host on desktop), so the UI can show real uptime across its own
+	// restarts. Atomic: written by SetCoreStatus, read by readStatus each tick.
+	startedAtMs atomic.Int64
 
 	logLevel LogLevel
 }

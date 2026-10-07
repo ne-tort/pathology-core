@@ -640,8 +640,13 @@ type SystemInfo struct {
 	DownlinkTotal    int64                  `protobuf:"varint,9,opt,name=downlink_total,json=downlinkTotal,proto3" json:"downlink_total,omitempty"`
 	CurrentOutbound  string                 `protobuf:"bytes,10,opt,name=current_outbound,json=currentOutbound,proto3" json:"current_outbound,omitempty"`
 	CurrentProfile   string                 `protobuf:"bytes,11,opt,name=current_profile,json=currentProfile,proto3" json:"current_profile,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Unix millis of the moment the service entered STARTED (true tunnel start,
+	// owned by the core process — survives UI restarts). 0 when not running.
+	StartedAtMs int64 `protobuf:"varint,12,opt,name=started_at_ms,json=startedAtMs,proto3" json:"started_at_ms,omitempty"`
+	// Protocol type of the active leaf outbound (e.g. "hysteria2").
+	CurrentOutboundType string `protobuf:"bytes,13,opt,name=current_outbound_type,json=currentOutboundType,proto3" json:"current_outbound_type,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *SystemInfo) Reset() {
@@ -747,6 +752,20 @@ func (x *SystemInfo) GetCurrentOutbound() string {
 func (x *SystemInfo) GetCurrentProfile() string {
 	if x != nil {
 		return x.CurrentProfile
+	}
+	return ""
+}
+
+func (x *SystemInfo) GetStartedAtMs() int64 {
+	if x != nil {
+		return x.StartedAtMs
+	}
+	return 0
+}
+
+func (x *SystemInfo) GetCurrentOutboundType() string {
+	if x != nil {
+		return x.CurrentOutboundType
 	}
 	return ""
 }
@@ -2859,7 +2878,7 @@ const file_v2_hcore_hcore_proto_rawDesc = "" +
 	"\x06secret\x18\x06 \x01(\tR\x06secret\x12\x14\n" +
 	"\x05debug\x18\a \x01(\bR\x05debug\x12$\n" +
 	"\x04mode\x18\b \x01(\x0e2\x10.hcore.SetupModeR\x04mode\x12*\n" +
-	"\x11fix_android_stack\x18\t \x01(\bR\x0ffixAndroidStack\"\x93\x03\n" +
+	"\x11fix_android_stack\x18\t \x01(\bR\x0ffixAndroidStack\"\xeb\x03\n" +
 	"\n" +
 	"SystemInfo\x12\x16\n" +
 	"\x06memory\x18\x01 \x01(\x03R\x06memory\x12\x1e\n" +
@@ -2875,7 +2894,9 @@ const file_v2_hcore_hcore_proto_rawDesc = "" +
 	"\x0edownlink_total\x18\t \x01(\x03R\rdownlinkTotal\x12)\n" +
 	"\x10current_outbound\x18\n" +
 	" \x01(\tR\x0fcurrentOutbound\x12'\n" +
-	"\x0fcurrent_profile\x18\v \x01(\tR\x0ecurrentProfile\"\x89\x05\n" +
+	"\x0fcurrent_profile\x18\v \x01(\tR\x0ecurrentProfile\x12\"\n" +
+	"\rstarted_at_ms\x18\f \x01(\x03R\vstartedAtMs\x122\n" +
+	"\x15current_outbound_type\x18\r \x01(\tR\x13currentOutboundType\"\x89\x05\n" +
 	"\fOutboundInfo\x12\x10\n" +
 	"\x03tag\x18\x01 \x01(\tR\x03tag\x12\x12\n" +
 	"\x04type\x18\x02 \x01(\tR\x04type\x12>\n" +

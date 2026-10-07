@@ -2,6 +2,7 @@ package hcore
 
 import (
 	"fmt"
+	"time"
 
 	hcommon "github.com/ne-tort/pathology-core/v2/hcommon"
 	"google.golang.org/grpc"
@@ -13,6 +14,18 @@ func SetCoreStatus(state CoreStates, msgType MessageType, message string) *CoreI
 		msg = fmt.Sprintf("%s: %s", state.String(), message)
 	}
 	Log(LogLevel_INFO, LogType_CORE, msg)
+	// Tunnel uptime source for the UI: stamp the STARTED transition once (a
+	// repeated STARTED, e.g. ALREADY_STARTED re-announce, must not reset the
+	// clock) and clear it on STOPPED. Lives in the core process so the uptime
+	// survives UI restarts on both desktop (Host) and Android (bg service).
+	switch state {
+	case CoreStates_STARTED:
+		if static.CoreState != CoreStates_STARTED {
+			static.startedAtMs.Store(time.Now().UnixMilli())
+		}
+	case CoreStates_STOPPED:
+		static.startedAtMs.Store(0)
+	}
 	static.CoreState = state
 	info := CoreInfoResponse{
 		CoreState:   state,

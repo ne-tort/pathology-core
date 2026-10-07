@@ -85,6 +85,11 @@ message SystemInfo {
   int64 downlink_total = 9;
   string current_outbound = 10;
   string current_profile = 11;
+  // Unix millis of the moment the service entered STARTED (true tunnel start,
+  // owned by the core process — survives UI restarts). 0 when not running.
+  int64 started_at_ms = 12;
+  // Protocol type of the active leaf outbound (e.g. "hysteria2").
+  string current_outbound_type = 13;
 }
 
 message OutboundInfo {
