@@ -201,6 +201,12 @@ func setOutbounds(options *option.Options, input *option.Options, opt *ClientOpt
 			if !keepIPv6 && dialerDetourIsIPv6Leaf(out.Options) {
 				continue
 			}
+			// The side box must not run a second provider: the hub keeps one
+			// session and replaces it on every auth, so a TestEngine provider
+			// ping-pongs the main core's session for the whole probe window.
+			if opt.TestMode {
+				continue
+			}
 			outbounds = append(outbounds, out)
 			continue
 		default:

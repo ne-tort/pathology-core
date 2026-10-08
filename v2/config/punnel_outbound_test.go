@@ -59,6 +59,38 @@ func TestPunnelExcludedFromBalancerLeaves(t *testing.T) {
 	}
 }
 
+func TestPunnelDroppedFromTestModeSideBox(t *testing.T) {
+	opt := DefaultClientOptions()
+	opt.TestMode = true
+	input := &option.Options{
+		Outbounds: []option.Outbound{
+			{
+				Type: C.TypeVLESS,
+				Tag:  "node-a",
+				Options: &option.VLESSOutboundOptions{
+					DialerOptions: option.DialerOptions{},
+				},
+			},
+			{
+				Type: "punnel",
+				Tag:  "punnel-client",
+				Options: &option.DirectOutboundOptions{
+					DialerOptions: option.DialerOptions{Detour: "node-a"},
+				},
+			},
+		},
+	}
+	var out option.Options
+	if err := setOutbounds(&out, input, opt, &map[string][]string{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range out.Outbounds {
+		if o.Type == "punnel" {
+			t.Fatalf("TestMode side box must not run a second punnel provider, got %q", o.Tag)
+		}
+	}
+}
+
 func TestPunnelIPv6DetourDroppedWhenIPv6Filtered(t *testing.T) {
 	opt := DefaultClientOptions()
 	opt.SubscriptionIPv6 = false
