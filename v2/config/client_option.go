@@ -170,7 +170,7 @@ func DefaultClientOptions() *ClientOptions {
 	return &ClientOptions{
 		EnableNTP: true,
 		DNSOptions: DNSOptions{
-			RemoteDnsServers:        []string{"local"},
+			RemoteDnsServers:        []string{"https://1.1.1.1/dns-query", "https://dns.google/dns-query"},
 			RemoteDnsGroupMode:      "stable",
 			RemoteDnsErrorTTL:       "2",
 			RemoteDnsWinTTL:         "5",
