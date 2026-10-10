@@ -5,7 +5,7 @@
 #   - with_grpc, with_conntrack — Hiddify CommandClient / platform needs
 #   - with_cloudflared, with_openvpn, with_openconnect, with_tailscale — full endpoint/inbound parity with lx DEFAULT_BUILD_TAGS
 #   - with_carrier (+ provider tags) — carrier inbound+outbound (not client-only)
-#   - with_pathology — WG Pathology endpoint (parity with Makefile.lx LX_TAGS / server tags)
+#   - with_pathologywg — WG PathologyWG morpher (parity with Makefile.lx LX_TAGS / server tags)
 #   - with_lx_utls — FEATURE 018 lab ClientHello catalog (requires with_utls)
 # Intentionally omitted (not VPN tunnel protocols; same rationale as Makefile.lx LX_TAGS):
 #   - with_clash_api — retired: app no longer emits experimental.clash_api; stub build is enough
@@ -15,4 +15,4 @@
 #   - with_v2ray_api — unused (Hiddify uses its own gRPC); optional for standalone CLI builds
 #   - with_ech / with_reality_server — deprecated compile stubs in lx
 #   - with_l3router — separate FEATURE; not enabled in client tags yet
-with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_lx_utls,with_grpc,with_awg,with_pathology,tfogo_checklinkname0,with_naive_outbound,with_conntrack,with_xhttp,with_mieru,with_derp,with_shadowquic,with_sudoku,with_trusttunnel,with_hysteria_transport,with_carrier,with_carrier_vk,with_carrier_jitsi,with_carrier_telemost,with_carrier_wbstream,with_balancer,with_ssh,with_demux,with_punnel,with_cloudflared,with_openvpn,with_openconnect,with_tailscale,with_purego,badlinkname
+with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_lx_utls,with_grpc,with_awg,with_pathologywg,tfogo_checklinkname0,with_naive_outbound,with_conntrack,with_xhttp,with_mieru,with_derp,with_shadowquic,with_sudoku,with_trusttunnel,with_hysteria_transport,with_carrier,with_carrier_vk,with_carrier_jitsi,with_carrier_telemost,with_carrier_wbstream,with_balancer,with_ssh,with_demux,with_punnel,with_cloudflared,with_openvpn,with_openconnect,with_tailscale,with_purego,badlinkname

@@ -13,12 +13,12 @@ import (
 	"github.com/sagernet/sing/common/json/badoption"
 )
 
-// PathologySingbox maps pathology-wg:// share links to a WireGuard endpoint with
-// nested pathology{} (SPEC 059). Mutually exclusive with awg2/awg3.
+// PathologySingbox maps pathologywg:// share links to a WireGuard endpoint with
+// nested pathologywg{} (SPEC 084). Mutually exclusive with awg2/awg3.
 //
 // Compact form (preferred):
 //
-//	pathology-wg://host:port/<base64url>#tag
+//	pathologywg://host:port/<base64url>#tag
 //
 // where base64url is JSON:
 //
@@ -29,27 +29,30 @@ import (
 //	  "allowed_ips": "0.0.0.0/0,::/0",
 //	  "mtu": 1280,
 //	  "keepalive": "25",
-//	  "pathology": { "enabled": true, "key": "<psk>", "auto": true, ... }
+//	  "pathologywg": { "enabled": true, "key": "<psk>", "auto": true, ... }
 //	}
 //
 // Query fallback:
 //
-//	pathology-wg://host:port/?pk=…&peer_public_key=…&local_address=…&pathology_key=…&auto=1
+//	pathologywg://host:port/?pk=…&peer_public_key=…&local_address=…&pathologywg_key=…&auto=1
 //
-// Aliases: pathology:// (legacy share with host:port), patologiya://.
+// Aliases: pathology-wg:// (previous canonical), pathology:// (legacy share
+// with host:port), patologiya://. Body key "pathology" is dual-read.
 func PathologySingbox(rawURL string) (*T.Endpoint, error) {
 	rawURL = strings.TrimSpace(rawURL)
 	lower := strings.ToLower(rawURL)
 	switch {
-	case strings.HasPrefix(lower, "pathology-wg://"):
+	case strings.HasPrefix(lower, "pathologywg://"):
 		// ok (canonical)
+	case strings.HasPrefix(lower, "pathology-wg://"):
+		rawURL = "pathologywg://" + rawURL[len("pathology-wg://"):]
 	case strings.HasPrefix(lower, "patologiya://"):
-		rawURL = "pathology-wg://" + rawURL[len("patologiya://"):]
+		rawURL = "pathologywg://" + rawURL[len("patologiya://"):]
 	case strings.HasPrefix(lower, "pathology://"):
 		// Legacy VPN share scheme (app deep links are pathology:///path without VPN host).
-		rawURL = "pathology-wg://" + rawURL[len("pathology://"):]
+		rawURL = "pathologywg://" + rawURL[len("pathology://"):]
 	default:
-		return nil, E.New("pathology: unsupported scheme")
+		return nil, E.New("pathologywg: unsupported scheme")
 	}
 
 	u, err := url.Parse(rawURL)
@@ -102,15 +105,18 @@ func PathologySingbox(rawURL string) (*T.Endpoint, error) {
 		return nil, E.Cause(err, "pathology local_address")
 	}
 
-	pathOpts := body.Pathology
+	pathOpts := body.PathologyWG
+	if !pathOpts.IsSet() && body.PathologyAlias.IsSet() {
+		pathOpts = body.PathologyAlias
+	}
 	if pathOpts.Key == "" {
-		pathOpts.Key = firstNonEmpty(body.PathologyKey, body.Key)
+		pathOpts.Key = firstNonEmpty(body.PathologyWGKey, body.PathologyKey, body.Key)
 	}
 	if body.Auto != nil {
 		pathOpts.Auto = *body.Auto
 	}
 	if pathOpts.Key == "" {
-		return nil, E.New("pathology: pathology.key (or pathology_key) is required")
+		return nil, E.New("pathologywg: pathologywg.key (or pathologywg_key) is required")
 	}
 	pathOpts.Enabled = true
 
@@ -149,15 +155,15 @@ func PathologySingbox(rawURL string) (*T.Endpoint, error) {
 
 	tag := name
 	if tag == "" {
-		tag = "pathology"
+		tag = "PathologyWG"
 	}
 	opts := &T.WireGuardEndpointOptions{
-		Address:    toPrefixableAddrs(addrs),
-		PrivateKey: pk,
-		Peers:      []T.WireGuardPeer{peer},
-		MTU:        body.MTU,
-		Workers:    body.Workers,
-		Pathology:  pathOpts,
+		Address:     toPrefixableAddrs(addrs),
+		PrivateKey:  pk,
+		Peers:       []T.WireGuardPeer{peer},
+		MTU:         body.MTU,
+		Workers:     body.Workers,
+		PathologyWG: pathOpts,
 	}
 	clampObfuscatedWGMTU(opts)
 	return &T.Endpoint{
@@ -168,23 +174,25 @@ func PathologySingbox(rawURL string) (*T.Endpoint, error) {
 }
 
 type pathologyShareBody struct {
-	PK            string             `json:"pk"`
-	PrivateKey    string             `json:"private_key"`
-	PeerPublicKey string             `json:"peer_public_key"`
-	PeerPub       string             `json:"peer_pub"`
-	PublicKey     string             `json:"public_key"`
-	LocalAddress  string             `json:"local_address"`
-	Address       string             `json:"address"`
-	AllowedIPs    string             `json:"allowed_ips"`
-	PreSharedKey  string             `json:"pre_shared_key"`
-	Reserved      string             `json:"reserved"`
-	MTU           uint32             `json:"mtu"`
-	Workers       int                `json:"workers"`
-	Keepalive     string             `json:"keepalive"`
-	PathologyKey  string             `json:"pathology_key"`
-	Key           string             `json:"key"`
-	Auto          *bool              `json:"auto"`
-	Pathology     T.PathologyOptions `json:"pathology"`
+	PK             string               `json:"pk"`
+	PrivateKey     string               `json:"private_key"`
+	PeerPublicKey  string               `json:"peer_public_key"`
+	PeerPub        string               `json:"peer_pub"`
+	PublicKey      string               `json:"public_key"`
+	LocalAddress   string               `json:"local_address"`
+	Address        string               `json:"address"`
+	AllowedIPs     string               `json:"allowed_ips"`
+	PreSharedKey   string               `json:"pre_shared_key"`
+	Reserved       string               `json:"reserved"`
+	MTU            uint32               `json:"mtu"`
+	Workers        int                  `json:"workers"`
+	Keepalive      string               `json:"keepalive"`
+	PathologyWGKey string               `json:"pathologywg_key"`
+	PathologyKey   string               `json:"pathology_key"`
+	Key            string               `json:"key"`
+	Auto           *bool                `json:"auto"`
+	PathologyWG    T.PathologyWGOptions `json:"pathologywg"`
+	PathologyAlias T.PathologyWGOptions `json:"pathology"`
 }
 
 func pathologyFromParams(host string, port uint16, name string, params map[string]string) (*T.Endpoint, error) {
@@ -198,9 +206,9 @@ func pathologyFromParams(host string, port uint16, name string, params map[strin
 	if err != nil {
 		return nil, err
 	}
-	pathKey := firstNonEmpty(params["pathology key"], params["pathologykey"], params["pathology_key"], params["key"])
+	pathKey := firstNonEmpty(params["pathologywg key"], params["pathologywgkey"], params["pathologywg_key"], params["pathology key"], params["pathologykey"], params["pathology_key"], params["key"])
 	if pathKey == "" {
-		return nil, E.New("pathology: pathology_key is required")
+		return nil, E.New("pathologywg: pathologywg_key is required")
 	}
 	pathOpts := pathologyOptionsFromParams(params)
 	pathOpts.Key = pathKey
@@ -224,15 +232,15 @@ func pathologyFromParams(host string, port uint16, name string, params map[strin
 
 	tag := name
 	if tag == "" {
-		tag = "pathology"
+		tag = "PathologyWG"
 	}
 	opts := &T.WireGuardEndpointOptions{
-		Address:    toPrefixableAddrs(addrs),
-		PrivateKey: pk,
-		Peers:      []T.WireGuardPeer{peer},
-		MTU:        uint32(toUInt16(params["mtu"], 0)),
-		Workers:    int(toUInt16(params["workers"], 0)),
-		Pathology:  pathOpts,
+		Address:     toPrefixableAddrs(addrs),
+		PrivateKey:  pk,
+		Peers:       []T.WireGuardPeer{peer},
+		MTU:         uint32(toUInt16(params["mtu"], 0)),
+		Workers:     int(toUInt16(params["workers"], 0)),
+		PathologyWG: pathOpts,
 	}
 	clampObfuscatedWGMTU(opts)
 	return &T.Endpoint{
@@ -242,8 +250,8 @@ func pathologyFromParams(host string, port uint16, name string, params map[strin
 	}, nil
 }
 
-func pathologyOptionsFromParams(params map[string]string) T.PathologyOptions {
-	o := T.PathologyOptions{
+func pathologyOptionsFromParams(params map[string]string) T.PathologyWGOptions {
+	o := T.PathologyWGOptions{
 		Persona:     getOneOfN(params, "", "persona"),
 		IdlePersona: getOneOfN(params, "", "idle persona", "idle_persona"),
 		PadStrategy: getOneOfN(params, "", "pad strategy", "pad_strategy"),

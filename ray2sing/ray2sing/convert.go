@@ -64,7 +64,8 @@ var endpointParsers = map[string]EndpointParserFunc{
 	"wireguard://":     WireguardEndpoint,
 	"awg://":           AWGSingbox,
 	"vpn://":           AmneziaVpnEndpoint,
-	"pathology-wg://":  PathologySingbox,
+	"pathologywg://":   PathologySingbox,
+	"pathology-wg://":  PathologySingbox, // previous canonical scheme
 	"pathology://":     PathologySingbox, // legacy share; app deep links use pathology:// without VPN host:port
 	"patologiya://":    PathologySingbox,
 	"[Interface]":      AWGSingboxTxt,

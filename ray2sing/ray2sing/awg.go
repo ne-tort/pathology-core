@@ -117,13 +117,13 @@ func applyAmneziaNested(opts *T.WireGuardEndpointOptions, awg T.AmneziaWGOptions
 	clampObfuscatedWGMTU(opts)
 }
 
-// clampObfuscatedWGMTU caps client MTU at 1280 when AWG/pathology is active
+// clampObfuscatedWGMTU caps client MTU at 1280 when AWG/pathologywg is active
 // (AmneziaWG / LxBox §097 recommendation). Plain WG is left untouched.
 func clampObfuscatedWGMTU(opts *T.WireGuardEndpointOptions) {
 	if opts == nil {
 		return
 	}
-	if !opts.AWG2.IsSet() && !opts.AWG3.IsSet() && !opts.Pathology.IsSet() {
+	if !opts.AWG2.IsSet() && !opts.AWG3.IsSet() && !opts.PathologyWG.IsSet() && !opts.PathologyWGAlias.IsSet() {
 		return
 	}
 	if opts.MTU == 0 || opts.MTU > 1280 {
