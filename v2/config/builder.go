@@ -34,8 +34,10 @@ func normalizeBalancerStrategy(strategy string) string {
 		return "least-connections"
 	case "sourceHash":
 		return "source-hash"
+	case "firstAlive":
+		return "first-alive"
 	case "round-robin", "lowest-delay", "least-load", "sticky-sessions",
-		"consistent-hashing", "least-connections", "source-hash":
+		"consistent-hashing", "least-connections", "source-hash", "first-alive":
 		return strategy
 	default:
 		// Unknown → engine-safe default for the balance outbound (distinct from `lowest`).
@@ -337,8 +339,30 @@ func setOutbounds(options *option.Options, input *option.Options, opt *ClientOpt
 
 	// Two balancers as selectable modes under `select` (not route.final):
 	//   lowest  — lowest-delay (latency)
-	//   balance — user strategy (round-robin / least-load / sticky / …); SPEC 102
+	//   balance — user strategy (round-robin / least-load / sticky / first-alive / …); SPEC 102
 	// lx balancer.default: pin while Alive; Dead → strategy among the rest.
+	// Shared tuning: user probe interval / rate-limit / URLs drive both
+	// balancers; `expected` trims only the user-strategy candidate pool.
+	var balancerInterval, balancerIdle, balancerProbeDelay badoption.Duration
+	if opt.BalancerIntervalS > 0 {
+		balancerInterval = badoption.Duration(time.Duration(opt.BalancerIntervalS) * time.Second)
+		// Engine requires idle_timeout >= interval; give the checker a few
+		// quiet rounds of headroom without probing forever when unused.
+		balancerIdle = balancerInterval * 4
+	}
+	if opt.BalancerTestDelayMs > 0 {
+		balancerProbeDelay = badoption.Duration(time.Duration(opt.BalancerTestDelayMs) * time.Millisecond)
+	}
+	var probeLinks badoption.Listable[string]
+	if len(opt.ConnectionTestUrls) > 0 {
+		probeLinks = badoption.Listable[string](opt.ConnectionTestUrls)
+	} else if opt.ConnectionTestUrl != "" {
+		probeLinks = badoption.Listable[string]{opt.ConnectionTestUrl}
+	}
+	var balanceExpected uint
+	if opt.BalancerCandidates > 0 {
+		balanceExpected = uint(opt.BalancerCandidates)
+	}
 	lowestOpts := &option.BalancerOutboundOptions{
 		Outbounds:                 tags,
 		Default:                   preferred,
@@ -346,6 +370,10 @@ func setOutbounds(options *option.Options, input *option.Options, opt *ClientOpt
 		DelayAcceptableRatio:      2,
 		Tolerance:                 1,
 		InterruptExistConnections: true,
+		Interval:                  balancerInterval,
+		IdleTimeout:               balancerIdle,
+		ProbeDelay:                balancerProbeDelay,
+		URLs:                      probeLinks,
 	}
 	balanceOpts := &option.BalancerOutboundOptions{
 		Outbounds:                 tags,
@@ -354,6 +382,11 @@ func setOutbounds(options *option.Options, input *option.Options, opt *ClientOpt
 		DelayAcceptableRatio:      2,
 		Tolerance:                 1,
 		InterruptExistConnections: true,
+		Interval:                  balancerInterval,
+		IdleTimeout:               balancerIdle,
+		ProbeDelay:                balancerProbeDelay,
+		URLs:                      probeLinks,
+		Expected:                  balanceExpected,
 	}
 	urlTest := option.Outbound{
 		Type:    C.TypeBalancer,

@@ -22,6 +22,15 @@ type ClientOptions struct {
 	BlockAds                bool   `json:"block-ads,omitempty" overridable:"true"`
 	UseXrayCoreWhenPossible bool   `json:"use-xray-core-when-possible,omitempty" overridable:"true"`
 	BalancerStrategy        string `json:"balancer-strategy,omitempty" overridable:"true"`
+	// BalancerCandidates trims the user-strategy pool to the top-N alive
+	// outbounds (engine `expected`; 0 = all).
+	BalancerCandidates int `json:"balancer-candidates,omitempty" overridable:"true"`
+	// BalancerTestDelayMs rate-limits health probes: >0 probes one outbound at
+	// a time with this pause between requests (0 = engine's parallel burst).
+	BalancerTestDelayMs int `json:"balancer-test-delay-ms,omitempty" overridable:"true"`
+	// BalancerIntervalS is the probe/rebalance period in seconds (0 = engine
+	// default 3m). Also drives how often a first-alive pin may migrate.
+	BalancerIntervalS int `json:"balancer-interval-s,omitempty" overridable:"true"`
 	// GeoIPPath        string      `json:"geoip-path"`
 	// GeoSitePath      string      `json:"geosite-path"`
 	Rules     []Rule      `json:"rules,omitempty" overridable:"true"`
