@@ -16,7 +16,14 @@ const (
 func ResolveStartTarget(st State, workingDir string) (StartTarget, error) {
 	if st.StartTarget != nil && st.StartTarget.Path != "" {
 		if _, err := os.Stat(st.StartTarget.Path); err == nil {
-			return *st.StartTarget, nil
+			// Honor the cached target only while the session itself is still
+			// connectable: direct mode on, or at least one active profile.
+			// Otherwise a stale cache (e.g. _direct.json from a past «No VPN»
+			// session, or a profile the user has since disabled) would let the
+			// QS tile / shortcut connect something the UI would refuse to.
+			if st.DirectMode || len(st.ActiveProfileIDs) > 0 {
+				return *st.StartTarget, nil
+			}
 		}
 	}
 	configs := filepath.Join(workingDir, "configs")
