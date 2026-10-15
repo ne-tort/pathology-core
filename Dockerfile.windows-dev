@@ -1,0 +1,47 @@
+# Local-dev Windows core build (pathology-core.dll + PathologyCli.exe) in a
+# container — used when the host cgo toolchain is broken or mixed.
+#
+# NOT for CI/release: output lands in pathology-core/bin-docker/ via bind mount.
+#
+# Build context must be the REPO ROOT (the core replaces the engine by relative
+# path ../vendor/sing-box-pathology):
+#   docker build -f pathology-core/Dockerfile.windows-dev -t pathology-core-build .
+#
+# Run (the script scripts/build_local_1.5.ps1 wraps this):
+#   docker run --rm -v <repo>:/src -w /src/pathology-core pathology-core-build
+
+FROM golang:1.26-bookworm
+
+# mingw-w64 for the windows cgo (c-shared) target.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      gcc-mingw-w64-x86-64 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV GOOS=windows GOARCH=amd64 CGO_ENABLED=1 \
+    CC=x86_64-w64-mingw32-gcc \
+    GOPATH=/go GOCACHE=/go/build-cache
+
+WORKDIR /src/pathology-core
+
+# Mirrors build_windows.bat, but stages into bin-docker/ (never bin/ — the
+# running client must not lose its DLL mid-flight).
+CMD ["/bin/bash", "-c", "\
+  set -e; \
+  TAGS=$(grep -v '^#' build_tags.txt | tr -d '\r' | grep -v '^$' | paste -sd, -); \
+  mkdir -p bin-docker; \
+  echo \"[docker] tags: $TAGS\"; \
+  echo '[docker] building pathology-core.dll...'; \
+  go build -trimpath -tags \"$TAGS,with_purego\" -buildmode=c-shared \
+    -ldflags='-w -s -checklinkname=0' -o bin-docker/pathology-core.dll ./platform/desktop; \
+  echo '[docker] building PathologyCli.exe...'; \
+  cp -f bin-docker/pathology-core.dll pathology-core.dll; \
+  CGO_LDFLAGS=pathology-core.dll \
+  go build -trimpath -tags \"$TAGS,with_purego\" \
+    -ldflags='-w -s -checklinkname=0' -o bin-docker/PathologyCli.exe ./cmd/bydll; \
+  rm -f pathology-core.dll; \
+  CRONET_DIR=$(go list -m -f '{{.Dir}}' github.com/sagernet/cronet-go/lib/windows_amd64 2>/dev/null || true); \
+  if [ -n \"$CRONET_DIR\" ] && [ -f \"$CRONET_DIR/libcronet.dll\" ]; then cp -f \"$CRONET_DIR/libcronet.dll\" bin-docker/; \
+  elif [ -f bin/libcronet.dll ]; then cp -f bin/libcronet.dll bin-docker/; \
+  else echo '[docker] WARN: libcronet.dll not found (copy it into bin-docker/ before running the app)'; fi; \
+  echo '[docker] done: bin-docker/' \
+"]
