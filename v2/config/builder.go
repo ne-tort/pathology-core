@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"sort"
 	"strings"
 	sync "sync"
 	"time"
@@ -160,6 +161,10 @@ func setOutbounds(options *option.Options, input *option.Options, opt *ClientOpt
 	var outbounds []option.Outbound
 	var endpoints []option.Endpoint
 	var tags []string
+	// rotationTags are first-alive groups synthesized for pathology legend
+	// parents: user-selectable (selector), but never members of lowest/balance
+	// (a rotation group is not an exit leaf).
+	var rotationTags []string
 	OutboundMainDetour = OutboundSelectTag
 	detours := resolvedChainDetours(opt.Chain)
 	knownExits := chainKnownExitSet(input)
@@ -218,6 +223,31 @@ func setOutbounds(options *option.Options, input *option.Options, opt *ClientOpt
 			// as punnel). A pathology outbound WITHOUT legends is a plain leaf.
 			if po, ok := out.Options.(*option.PathologyOutboundOptions); ok && po != nil && len(po.Legends) > 0 {
 				outbounds = append(outbounds, out)
+				// Failure-rotation group over the legend virtuals: the CP emits
+				// only the parent; the group's members ({parent}-{legend}) exist
+				// after the engine's ExpandPathologyOutbounds (box.New expands
+				// before resolving dependencies, proven by the engine's
+				// pathology_legend_group test).
+				legendIDs := make([]string, 0, len(po.Legends))
+				for id := range po.Legends {
+					legendIDs = append(legendIDs, id)
+				}
+				sort.Strings(legendIDs)
+				virtuals := make([]string, 0, len(legendIDs))
+				for _, id := range legendIDs {
+					virtuals = append(virtuals, out.Tag+"-"+id)
+				}
+				groupTag := out.Tag + "-auto"
+				outbounds = append(outbounds, option.Outbound{
+					Type: C.TypeBalancer,
+					Tag:  groupTag,
+					Options: &option.BalancerOutboundOptions{
+						Strategy:                  "first-alive",
+						Outbounds:                 virtuals,
+						InterruptExistConnections: true,
+					},
+				})
+				rotationTags = append(rotationTags, groupTag)
 				continue
 			}
 			if contains([]string{"direct", "bypass", "block"}, out.Tag) {
@@ -462,6 +492,7 @@ func setOutbounds(options *option.Options, input *option.Options, opt *ClientOpt
 		defaultSelect = tags[0]
 	}
 	selectorTags := append([]string{}, tags...)
+	selectorTags = append(selectorTags, rotationTags...)
 	if len(tags) > 1 {
 		selectorTags = append([]string{urlTest.Tag, balancer.Tag}, selectorTags...)
 		defaultSelect = balancer.Tag // auto load-balance until user picks otherwise

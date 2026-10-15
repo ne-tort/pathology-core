@@ -107,3 +107,82 @@ func TestChainNeverDetoursGroupWrappers(t *testing.T) {
 		}
 	}
 }
+
+// A legend parent gets a synthesized first-alive rotation group over its
+// {parent}-{legend} virtuals: in the selector (user-selectable), never in
+// lowest/balance member pools (a rotation group is not an exit leaf).
+func TestPathologyLegendParentSynthesizesRotationGroup(t *testing.T) {
+	opt := DefaultClientOptions()
+	input := &option.Options{
+		Outbounds: []option.Outbound{
+			{
+				Type: C.TypeVLESS,
+				Tag:  "node-a",
+				Options: &option.VLESSOutboundOptions{
+					DialerOptions: option.DialerOptions{},
+				},
+			},
+			{
+				Type: C.TypePathology,
+				Tag:  "path-auto",
+				Options: &option.PathologyOutboundOptions{
+					ServerOptions: option.ServerOptions{Server: "1.2.3.4"},
+					Legends: map[string]option.PathologyLegendEntry{
+						"stun": {}, "dns": {},
+					},
+				},
+			},
+		},
+	}
+	var out option.Options
+	if err := setOutbounds(&out, input, opt, &map[string][]string{}); err != nil {
+		t.Fatal(err)
+	}
+
+	var group *option.Outbound
+	for i := range out.Outbounds {
+		o := &out.Outbounds[i]
+		if o.Tag == "path-auto-auto" {
+			group = o
+		}
+		if o.Tag == OutboundRoundRobinTag || o.Tag == OutboundURLTestTag {
+			opts := o.Options.(*option.BalancerOutboundOptions)
+			for _, tag := range opts.Outbounds {
+				if tag == "path-auto" || tag == "path-auto-auto" {
+					t.Fatalf("%s must not contain the legend parent or its rotation group (got %v)", o.Tag, opts.Outbounds)
+				}
+			}
+		}
+	}
+	if group == nil {
+		t.Fatal("rotation group path-auto-auto not synthesized")
+	}
+	opts := group.Options.(*option.BalancerOutboundOptions)
+	if opts.Strategy != "first-alive" {
+		t.Fatalf("want first-alive, got %q", opts.Strategy)
+	}
+	if !opts.InterruptExistConnections {
+		t.Fatal("rotation group must interrupt dead-pick connections")
+	}
+	want := []string{"path-auto-dns", "path-auto-stun"} // sorted
+	if len(opts.Outbounds) != 2 || opts.Outbounds[0] != want[0] || opts.Outbounds[1] != want[1] {
+		t.Fatalf("rotation group members = %v, want %v", opts.Outbounds, want)
+	}
+
+	// Selector lists the rotation group (user-selectable).
+	for _, o := range out.Outbounds {
+		if o.Tag != OutboundSelectTag {
+			continue
+		}
+		sel := o.Options.(*option.SelectorOutboundOptions)
+		found := false
+		for _, tag := range sel.Outbounds {
+			if tag == "path-auto-auto" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("selector must list the rotation group")
+		}
+	}
+}
