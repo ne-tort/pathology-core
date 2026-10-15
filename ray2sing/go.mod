@@ -259,26 +259,26 @@ require (
 )
 
 //replace github.com/sagernet/sing-box => github.com/hiddify/hiddify-sing-box v1.13.0-rc.2.0.20260215114412-cabace8fd3ce
-replace github.com/sagernet/sing-box => ../../sing-box-pathology
+replace github.com/sagernet/sing-box => ../../vendor/sing-box-pathology
 
 // replace github.com/xtls/xray-core => github.com/hiddify/xray-core v0.0.0-20260124181826-59e6569c13e9
-replace github.com/sagernet/wireguard-go => ../../sing-box-pathology/submodules/wireguard-go
+replace github.com/sagernet/wireguard-go => ../../vendor/sing-box-pathology/submodules/wireguard-go
 
 // lx gvisor (NewProtocolLocal) — keep in sync with pathology-core/go.mod.
-replace github.com/sagernet/gvisor => ../../sing-box-pathology/submodules/gvisor
+replace github.com/sagernet/gvisor => ../../vendor/sing-box-pathology/submodules/gvisor
 
 // lx patches/sing-tun (FlowPortWarmer / l3router TCP reply) — keep in sync with pathology-core/go.mod.
-replace github.com/sagernet/sing-tun => ../../sing-box-pathology/patches/sing-tun
+replace github.com/sagernet/sing-tun => ../../vendor/sing-box-pathology/patches/sing-tun
 
 // lx patches/sing-cloudflared — bridgeReturn.WriteReturnPackets for patched tun.Return.
-replace github.com/sagernet/sing-cloudflared => ../../sing-box-pathology/patches/sing-cloudflared
+replace github.com/sagernet/sing-cloudflared => ../../vendor/sing-box-pathology/patches/sing-cloudflared
 
 // lx:begin quic-grease-auth / jls chrome parrot (SPECS 093/099) — replace does not inherit from sing-box-lx.
-replace github.com/sagernet/quic-go => ../../sing-box-pathology/patches/quic-go
+replace github.com/sagernet/quic-go => ../../vendor/sing-box-pathology/patches/quic-go
 
-replace github.com/sagernet/sing-quic => ../../sing-box-pathology/patches/sing-quic
+replace github.com/sagernet/sing-quic => ../../vendor/sing-box-pathology/patches/sing-quic
 
-replace github.com/metacubex/jls-quic-go => ../../sing-box-pathology/patches/jls-quic-go
+replace github.com/metacubex/jls-quic-go => ../../vendor/sing-box-pathology/patches/jls-quic-go
 
 replace github.com/ameshkov/dnscrypt/v2 => github.com/shtorm-7/dnscrypt/v2 v2.4.0-extended-1.0.0
 

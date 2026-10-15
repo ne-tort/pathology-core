@@ -302,28 +302,28 @@ replace github.com/ameshkov/dnscrypt/v2 => github.com/shtorm-7/dnscrypt/v2 v2.4.
 replace github.com/hiddify/ray2sing => ./ray2sing
 
 // Engine: ne-tort/sing-box-pathology (sing-box 1.15 fork, checked out at hiddify-app/sing-box-pathology).
-replace github.com/sagernet/sing-box => ../sing-box-pathology
+replace github.com/sagernet/sing-box => ../vendor/sing-box-pathology
 
 // 1.5 consumes upstream sing-vmess v0.2.8 without a replace — dropped.
 
-replace github.com/sagernet/wireguard-go => ../sing-box-pathology/submodules/wireguard-go
+replace github.com/sagernet/wireguard-go => ../vendor/sing-box-pathology/submodules/wireguard-go
 
 // lx gvisor (NewProtocolLocal processor cap + dispatcher double-start guard).
 // Replace does not inherit from sing-box-pathology / sing-tun.
-replace github.com/sagernet/gvisor => ../sing-box-pathology/submodules/gvisor
+replace github.com/sagernet/gvisor => ../vendor/sing-box-pathology/submodules/gvisor
 
 // lx patches/sing-tun (FlowPortWarmer / l3router TCP reply) — required after lx merge.
-replace github.com/sagernet/sing-tun => ../sing-box-pathology/patches/sing-tun
+replace github.com/sagernet/sing-tun => ../vendor/sing-box-pathology/patches/sing-tun
 
 // lx patches/sing-cloudflared — bridgeReturn.WriteReturnPackets for patched tun.Return.
-replace github.com/sagernet/sing-cloudflared => ../sing-box-pathology/patches/sing-cloudflared
+replace github.com/sagernet/sing-cloudflared => ../vendor/sing-box-pathology/patches/sing-cloudflared
 
 // lx:begin quic-grease-auth / jls chrome parrot (SPECS 093/099) — replace does not inherit from sing-box-pathology.
-replace github.com/sagernet/quic-go => ../sing-box-pathology/patches/quic-go
+replace github.com/sagernet/quic-go => ../vendor/sing-box-pathology/patches/quic-go
 
-replace github.com/sagernet/sing-quic => ../sing-box-pathology/patches/sing-quic
+replace github.com/sagernet/sing-quic => ../vendor/sing-box-pathology/patches/sing-quic
 
-replace github.com/metacubex/jls-quic-go => ../sing-box-pathology/patches/jls-quic-go
+replace github.com/metacubex/jls-quic-go => ../vendor/sing-box-pathology/patches/jls-quic-go
 
 replace github.com/net2share/vaydns => github.com/hiddify/vaydns v0.0.0-20260401180616-890dc987a6a9
 
