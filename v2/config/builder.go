@@ -848,10 +848,10 @@ func setRoutingOptions(options *option.Options, input *option.Options, hopt *Cli
 
 		DefaultOptions: option.DefaultRule{
 			RawDefaultRule: option.RawDefaultRule{
-				IPCIDR: []string{
+				IPCIDR: prefixableCIDRs([]string{
 					"10.10.34.0/24",
 					"2001:4188:2:600:10:10:34:0/120",
-				},
+				}),
 			},
 			RuleAction: option.RuleAction{
 				Action: C.RuleActionTypeRoute,
@@ -885,7 +885,7 @@ func setRoutingOptions(options *option.Options, input *option.Options, hopt *Cli
 				Type: C.RuleTypeDefault,
 				DefaultOptions: option.DefaultRule{
 					RawDefaultRule: option.RawDefaultRule{
-						IPCIDR: []string{"100.64.0.0/10"},
+						IPCIDR: prefixableCIDRs([]string{"100.64.0.0/10"}),
 					},
 					RuleAction: option.RuleAction{
 						Action: C.RuleActionTypeRoute,

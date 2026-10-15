@@ -30,13 +30,16 @@ func TuicSingbox(tuicUrl string) (*T.Outbound, error) {
 		Type: "tuic",
 		Tag:  u.Name,
 		Options: &T.TUICOutboundOptions{
-			ServerOptions:     u.GetServerOption(),
-			UUID:              u.Username,
-			Password:          u.Password,
-			CongestionControl: decoded["congestioncontrol"],
-			UDPRelayMode:      decoded["udprelaymode"],
-			ZeroRTTHandshake:  false,
-			Heartbeat:         badoption.Duration(10 * time.Second),
+			ServerOptions: u.GetServerOption(),
+			UUID:          u.Username,
+			Password:      u.Password,
+			// 1.5: congestion_control / zero_rtt_handshake live on embedded QUICOptions (SSOT).
+			QUICOptions: T.QUICOptions{
+				CongestionControl: decoded["congestioncontrol"],
+				ZeroRTTHandshake:  false,
+			},
+			UDPRelayMode: decoded["udprelaymode"],
+			Heartbeat:    badoption.Duration(10 * time.Second),
 			OutboundTLSOptionsContainer: T.OutboundTLSOptionsContainer{
 				TLS: &T.OutboundTLSOptions{
 					Enabled:    true,

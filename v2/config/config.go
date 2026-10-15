@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/sagernet/sing-box/experimental/libbox"
 	"github.com/sagernet/sing-box/option"
 )
 
@@ -66,7 +65,7 @@ func BuildConfigJson(ctx context.Context, configOpt *ClientOptions, input *ReadO
 	if err != nil {
 		return nil, err
 	}
-	if err := libbox.CheckConfigOptions(options); err != nil {
+	if err := CheckConfigOptions(ctx, options); err != nil {
 		return nil, err
 	}
 

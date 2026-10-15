@@ -9,7 +9,6 @@ import (
 	"os"
 
 	"github.com/hiddify/ray2sing/ray2sing"
-	"github.com/sagernet/sing-box/experimental/libbox"
 	"github.com/sagernet/sing-box/option"
 	SJ "github.com/sagernet/sing/common/json"
 	"github.com/xmdhs/clash2singbox/convert"
@@ -165,7 +164,7 @@ func patchConfigOptions(ctx context.Context, options *option.Options, name strin
 }
 
 func validateResult(ctx context.Context, options *option.Options, name string) (*option.Options, error) {
-	err := libbox.CheckConfigOptions(options)
+	err := CheckConfigOptions(ctx, options)
 	if err != nil {
 		return nil, fmt.Errorf("[%s] invalid sing-box config: %w", name, err)
 	}

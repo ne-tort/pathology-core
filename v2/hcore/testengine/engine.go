@@ -624,7 +624,7 @@ func serviceContext(deps Deps) context.Context {
 	}
 	// Always refresh filemanager (paths + uid), same as Core.StartService.
 	// Stale BaseContext from before Setup enables chown on Windows and fails.
-	return libbox.FromContext(ctx, platform)
+	return libbox.BaseContext(platform)
 }
 
 func normalizeAllowlist(tags []string) []string {

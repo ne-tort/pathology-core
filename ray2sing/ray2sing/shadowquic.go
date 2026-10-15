@@ -39,8 +39,11 @@ func ShadowQUICSingbox(rawURL string) (*T.Outbound, error) {
 		ServerName:        serverName,
 		SNI:               getOneOfN(decoded, "", "sni"),
 		UDPOverStream:     decoded["udp over stream"] == "1" || decoded["udp over stream"] == "true" || decoded["uot"] == "1",
-		ZeroRTTHandshake:  zeroRTT,
-		CongestionControl: getOneOfN(decoded, "", "congestion control", "cc"),
+		// 1.5: congestion_control / zero_rtt_handshake live on embedded QUICOptions (SSOT).
+		QUICOptions: T.QUICOptions{
+			ZeroRTTHandshake:  zeroRTT,
+			CongestionControl: getOneOfN(decoded, "", "congestion control", "cc"),
+		},
 	}
 	if alpn := getOneOfN(decoded, "", "alpn"); alpn != "" {
 		opts.ALPN = badoption.Listable[string](strings.Split(alpn, ","))

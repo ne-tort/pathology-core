@@ -5,11 +5,11 @@ import (
 
 	box "github.com/sagernet/sing-box"
 
+	"github.com/ne-tort/pathology-core/v2/config"
 	"github.com/ne-tort/pathology-core/v2/service_manager"
 	"github.com/sagernet/sing-box/common/trafficcontrol"
 	"github.com/sagernet/sing-box/common/urltest"
 	"github.com/sagernet/sing-box/daemon"
-	"github.com/sagernet/sing-box/experimental/libbox"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/json"
 )
@@ -35,7 +35,7 @@ func newService(ctx context.Context, options option.Options, invokeMainHooks boo
 		OOMKillerDisabled: oomKillerDisabled,
 		OOMMemoryLimit:    oomMemoryLimit,
 	}
-	err := libbox.CheckConfigOptions(&options)
+	err := config.CheckConfigOptions(ctx, &options)
 	if err != nil {
 		return nil, err
 	}

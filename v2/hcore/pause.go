@@ -51,7 +51,12 @@ func Wake() {
 func ResetNetwork() {
 	if b := static.Box(); b != nil {
 		if n := b.Network(); n != nil {
-			n.ResetNetwork()
+			// 1.5: ResetNetwork takes a context; tie it to the core lifecycle.
+			ctx := static.Context()
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			n.ResetNetwork(ctx)
 		}
 	}
 }

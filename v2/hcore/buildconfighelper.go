@@ -38,7 +38,7 @@ func BuildConfig(ctx context.Context, in *StartRequest) (*option.Options, error)
 }
 
 func (s *CoreService) Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
-	return Parse(libbox.FromContext(ctx, nil), in)
+	return Parse(libbox.BaseContext(nil), in)
 }
 
 func Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
@@ -202,7 +202,7 @@ func ChangeClientSettings(in *ChangeClientSettingsRequest, insert bool) (*CoreIn
 }
 
 func (s *CoreService) GenerateConfig(ctx context.Context, in *GenerateConfigRequest) (*GenerateConfigResponse, error) {
-	return GenerateConfig(libbox.FromContext(ctx, nil), in)
+	return GenerateConfig(libbox.BaseContext(nil), in)
 }
 
 func GenerateConfig(ctx context.Context, in *GenerateConfigRequest) (*GenerateConfigResponse, error) {

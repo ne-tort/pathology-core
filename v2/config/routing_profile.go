@@ -348,9 +348,33 @@ func matchRule(rsTags, domains, cidrs []string, reject bool, outbound string) op
 		raw.DomainSuffix = domains
 	}
 	if len(cidrs) > 0 {
-		raw.IPCIDR = cidrs
+		raw.IPCIDR = prefixableCIDRs(cidrs)
 	}
 	return ruleWithAction(raw, reject, outbound)
+}
+
+// prefixableCIDRs converts CIDR strings to the sing-box 1.5 shape
+// (RawDefaultRule.IPCIDR changed []string → Listable[*Prefixable]).
+// Bare IPs become host prefixes (mirrors Prefixable.UnmarshalJSON);
+// unparsable entries are dropped — the engine rejects them at load anyway.
+func prefixableCIDRs(cidrs []string) badoption.Listable[*badoption.Prefixable] {
+	out := make(badoption.Listable[*badoption.Prefixable], 0, len(cidrs))
+	for _, c := range cidrs {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		if p, err := netip.ParsePrefix(c); err == nil {
+			pp := badoption.Prefixable(p)
+			out = append(out, &pp)
+			continue
+		}
+		if a, err := netip.ParseAddr(c); err == nil {
+			pp := badoption.Prefixable(netip.PrefixFrom(a, a.BitLen()))
+			out = append(out, &pp)
+		}
+	}
+	return out
 }
 
 func ownerRule(packages, processNames, processPaths, processPathRegexes []string, reject bool, outbound string) option.Rule {

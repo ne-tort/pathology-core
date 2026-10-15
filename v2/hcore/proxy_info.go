@@ -72,7 +72,7 @@ func (h *PathologyInstance) GetProxyInfo(url_test_history *adapter.URLTestHistor
 	out.Type = detour.Type()
 	if group, isGroup := detour.(adapter.OutboundGroup); isGroup {
 		out.IsGroup = true
-		gnow := group.Now()
+		gnow := monitoring.SelectedTag(group)
 		out.GroupSelectedTag = &gnow
 	}
 	out.TagDisplay = TrimTagName(out.Tag)
@@ -147,7 +147,7 @@ func (h *PathologyInstance) GetAllProxiesInfo(hismap map[string]*adapter.URLTest
 		group.Tag = iGroup.Tag()
 		group.Type = iGroup.Type()
 		_, group.Selectable = iGroup.(*G.Selector)
-		selectedTag := iGroup.Now()
+		selectedTag := monitoring.SelectedTag(iGroup)
 		group.Selected = selectedTag
 
 		// outbounds_converted[iGroup.Tag()].GroupSelectedOutbound = &group.Selected

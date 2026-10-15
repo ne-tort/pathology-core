@@ -113,6 +113,14 @@ func (h *MobilePlatformInterface) SendNotification(notification *libbox.Notifica
 	return h.platform.SendNotification(notification)
 }
 
+// CancelNotification is a sing-box 1.5 PlatformInterface addition.
+func (h *MobilePlatformInterface) CancelNotification(identifier string, typeID int32) error {
+	if h.platform == nil {
+		return nil
+	}
+	return h.platform.CancelNotification(identifier, typeID)
+}
+
 func (h *MobilePlatformInterface) StartNeighborMonitor(listener libbox.NeighborUpdateListener) error {
 	if h.platform == nil {
 		return nil
@@ -189,4 +197,20 @@ func (h *MobilePlatformInterface) CreateBridge(options *libbox.BridgeOptions) (l
 		return nil, fmt.Errorf("LX-STUB: CreateBridge unsupported")
 	}
 	return h.platform.CreateBridge(options)
+}
+
+// UsePlatformAutoRedirect / CreateAutoRedirect are sing-box 1.5 PlatformInterface
+// additions (tun auto_redirect); the mobile wrapper does not expose them —
+// delegate to the real platform when present, safe stubs otherwise.
+func (h *MobilePlatformInterface) UsePlatformAutoRedirect() bool {
+	if h.platform == nil {
+		return false
+	}
+	return h.platform.UsePlatformAutoRedirect()
+}
+func (h *MobilePlatformInterface) CreateAutoRedirect(options []byte, handler libbox.AutoRedirectHandler) (libbox.AutoRedirectSession, error) {
+	if h.platform == nil {
+		return nil, fmt.Errorf("LX-STUB: CreateAutoRedirect unsupported")
+	}
+	return h.platform.CreateAutoRedirect(options, handler)
 }

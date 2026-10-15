@@ -49,7 +49,7 @@ func (h *PathologyInstance) readStatus(prev *SystemInfo) *SystemInfo {
 			if currentOutBound, ok := box.Outbound().Outbound(current); ok {
 				leaf := currentOutBound
 				if g, ok := currentOutBound.(adapter.OutboundGroup); ok {
-					if now := g.Now(); now != "" {
+					if now := monitoring.SelectedTag(g); now != "" {
 						message.CurrentOutbound = fmt.Sprint(message.CurrentOutbound, "→", TrimTagName(now))
 						if next, ok := box.Outbound().Outbound(now); ok {
 							leaf = next
@@ -282,7 +282,7 @@ func (h *PathologyInstance) UrlTestActive(ctx context.Context) (*hcommon.Respons
 				Message: E.New("outbound is not a selector: ", config.OutboundSelectTag).Error(),
 			}, E.New("outbound is not a selector: ", config.OutboundSelectTag)
 		}
-		now := selector.Now()
+		now := monitoring.SelectedTag(selector)
 		if now == "" {
 			return &hcommon.Response{
 				Code:    hcommon.ResponseCode_FAILED,
@@ -300,7 +300,7 @@ func (h *PathologyInstance) UrlTestActive(ctx context.Context) (*hcommon.Respons
 			if !isgrp {
 				break
 			}
-			n2 := grp.Now()
+			n2 := monitoring.SelectedTag(grp)
 			if n2 == "" || n2 == now {
 				break
 			}

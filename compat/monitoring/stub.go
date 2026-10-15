@@ -171,12 +171,32 @@ func Get(ctx context.Context) *OutboundMonitoring {
 
 func RealTag(detour adapter.Outbound) string {
 	if group, isGroup := detour.(adapter.OutboundGroup); isGroup {
-		tag := group.Now()
+		tag := SelectedTag(group)
 		if tag != "" {
 			return tag
 		}
 	}
 	return detour.Tag()
+}
+
+// SelectedTag returns the tag of the group's currently selected outbound.
+//
+// sing-box 1.5 removed Now() from the adapter.OutboundGroup interface in
+// favour of Selected(network). The concrete *group.Selector / *balancer.Balancer
+// keep Now(); this helper is the interface-level equivalent used by UI/status
+// code: Selected("tcp") with a nil fallback to the first member of All()
+// (Selector.Now() used to fall back to tags[0] the same way).
+func SelectedTag(group adapter.OutboundGroup) string {
+	if group == nil {
+		return ""
+	}
+	if selected := group.Selected("tcp"); selected != nil {
+		return selected.Tag()
+	}
+	if all := group.All(); len(all) > 0 {
+		return all[0]
+	}
+	return ""
 }
 
 // TestNow probes a single outbound/endpoint tag, or every leaf if tag is a group.
@@ -251,7 +271,7 @@ func (m *OutboundMonitoring) testGroupLeaves(parent context.Context, group adapt
 		}
 	}
 	if len(leaves) == 0 {
-		if now := group.Now(); now != "" {
+		if now := SelectedTag(group); now != "" {
 			// Nested TestNowContext would double-count probesInFlight; probe inline.
 			if ob, ok := m.box.Outbound().Outbound(now); ok {
 				if _, isGroup := ob.(adapter.OutboundGroup); !isGroup {

@@ -23,11 +23,20 @@ func filterValidLeavesJSON(ctx context.Context, content []byte, filterInbounds b
 		return content, nil
 	}
 
+	// 1.5 hard-rejects a set of 1.4-era keys (QUIC parrot, hy bandwidth,
+	// trusttunnel legacy TLS, route action "direct", legacy vision flow).
+	// Rewrite them up front so one legacy leaf does not fail the whole import.
+	changed := false
+	if warnings := MigrateLegacyJSON(root); len(warnings) > 0 {
+		changed = true
+		for _, w := range warnings {
+			fmt.Printf("[SingboxParser] migrate 1.4→1.5: %s\n", w)
+		}
+	}
+
 	inOut, _ := root["outbounds"].([]interface{})
 	inEp, _ := root["endpoints"].([]interface{})
 	inLeafCount := countProtocolLeaves(inOut) + len(inEp)
-
-	changed := false
 
 	if len(inOut) > 0 {
 		filtered := filterOutboundLeaves(ctx, inOut)
@@ -256,11 +265,11 @@ func checkEndpointLeaf(ctx context.Context, leaf map[string]interface{}) (bool, 
 	if err := opts.UnmarshalJSONContext(ctx, raw); err != nil {
 		return false, err
 	}
-	// User WG endpoints often fail libbox.CheckConfigOptions in isolation (no dial/runtime).
+	// User WG endpoints often fail full-config validation in isolation (no dial/runtime).
 	if leafType(leaf) == "wireguard" {
 		return true, nil
 	}
-	if err := libbox.CheckConfigOptions(&opts); err != nil {
+	if err := libbox.CheckConfig(string(raw)); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -280,11 +289,8 @@ func checkConfigMap(ctx context.Context, cfg map[string]interface{}) (bool, erro
 	if err != nil {
 		return false, err
 	}
-	opts := option.Options{}
-	if err := opts.UnmarshalJSONContext(ctx, raw); err != nil {
-		return false, err
-	}
-	if err := libbox.CheckConfigOptions(&opts); err != nil {
+	_ = ctx // libbox.CheckConfig builds its own base context (1.5 replacement for CheckConfigOptions).
+	if err := libbox.CheckConfig(string(raw)); err != nil {
 		return false, err
 	}
 	return true, nil

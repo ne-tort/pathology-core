@@ -44,7 +44,8 @@ func NaiveSingbox(vlessURL string) (*T.Outbound, error) {
 			InsecureConcurrency:         toInt(getOneOfN(decoded, "0", "insecure_concurrency")),
 			ExtraHeaders:                GetHttpHeaders(getOneOfN(decoded, "", "header")),
 			QUIC:                        getOneOfN(decoded, "", "quic") != "",
-			QUICCongestionControl:       getOneOfN(decoded, "", "quic_congestion_control"),
+			// 1.5: field renamed to congestion_control (quic_congestion_control remains a JSON legacy alias).
+			CongestionControl:           getOneOfN(decoded, "", "quic_congestion_control"),
 			OutboundTLSOptionsContainer: tlsOptions,
 			UDPOverTCP:                  &uot,
 		},

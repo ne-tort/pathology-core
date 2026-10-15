@@ -5,6 +5,7 @@ import (
 
 	T "github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
+	"github.com/sagernet/sing/common/json/badoption"
 )
 
 // TrustTunnelSingbox maps trusttunnel:// share links to TrustTunnelOutboundOptions.
@@ -49,12 +50,18 @@ func TrustTunnelSingbox(rawURL string) (*T.Outbound, error) {
 
 	serverName := firstNonEmpty(decoded["sni"], decoded["server name"], hostname)
 	insecure := decoded["insecure"] == "1" || decoded["insecure"] == "true" || decoded["allowinsecure"] == "1" || decoded["skip verification"] == "1"
-	opts.TLS = &T.TrustTunnelTLSOptions{
-		ServerName:       serverName,
-		SkipVerification: insecure,
-		Certificate:      getOneOfN(decoded, "", "certificate", "cert"),
-		RemoteID:         getOneOfN(decoded, "", "remote id"),
+	// 1.5: legacy tls.skip_verification / tls.remote_id are gone (SPEC 115) —
+	// standard tls container (insecure) + root-level remote_id.
+	opts.RemoteID = getOneOfN(decoded, "", "remote id")
+	tlsOpts := &T.OutboundTLSOptions{
+		Enabled:    true,
+		ServerName: serverName,
+		Insecure:   insecure,
 	}
+	if cert := getOneOfN(decoded, "", "certificate", "cert"); cert != "" {
+		tlsOpts.Certificate = badoption.Listable[string]{cert}
+	}
+	opts.TLS = tlsOpts
 
 	if platform := getOneOfN(decoded, "", "platform"); platform != "" || getOneOfN(decoded, "", "app name", "ua") != "" {
 		opts.Headers = &T.TrustTunnelHeaderOptions{
