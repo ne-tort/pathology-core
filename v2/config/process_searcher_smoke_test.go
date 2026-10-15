@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ne-tort/pathology-core/v2/config"
+	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/process"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -70,24 +71,24 @@ func TestSmokeProcessSearcherSelfConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindProcessInfo(%s -> %s): %v", src, dst, err)
 	}
-	if info.ProcessID == 0 && info.ProcessPath == "" {
+	if info.ProcessID == 0 && len(info.ProcessPaths) == 0 {
 		t.Fatalf("empty owner: %+v", info)
 	}
 
 	self := os.Getpid()
 	exe, _ := os.Executable()
-	t.Logf("owner pid=%d path=%q self_pid=%d self_exe=%q", info.ProcessID, info.ProcessPath, self, exe)
+	t.Logf("owner pid=%d path=%q self_pid=%d self_exe=%q", info.ProcessID, ownerFirstPath(info), self, exe)
 
 	if info.ProcessID != 0 && int(info.ProcessID) != self {
 		// On some CI/sandbox setups the row may resolve to a wrapper; still require a path.
-		if info.ProcessPath == "" {
+		if len(info.ProcessPaths) == 0 {
 			t.Fatalf("pid mismatch (got %d want %d) and empty path", info.ProcessID, self)
 		}
-		t.Logf("pid mismatch tolerated (got %d want %d) path=%q", info.ProcessID, self, info.ProcessPath)
+		t.Logf("pid mismatch tolerated (got %d want %d) path=%q", info.ProcessID, self, ownerFirstPath(info))
 	}
-	if info.ProcessPath != "" && exe != "" {
+	if len(info.ProcessPaths) > 0 && exe != "" {
 		base := strings.ToLower(filepath.Base(exe))
-		got := strings.ToLower(filepath.Base(info.ProcessPath))
+		got := strings.ToLower(filepath.Base(ownerFirstPath(info)))
 		// go test binary names vary (config.test.exe / __debug_bin); require shared stem or .test
 		if got != base && !strings.Contains(got, "test") && !strings.Contains(base, "test") {
 			t.Logf("basename differ self=%q owner=%q (ok if sandbox)", base, got)
@@ -153,4 +154,13 @@ func TestSmokeCompileProcessOwnerFindProcess(t *testing.T) {
 func addrFromTCP(a *net.TCPAddr) netip.Addr {
 	ip, _ := netip.AddrFromSlice(a.IP)
 	return ip.Unmap()
+}
+
+// ownerFirstPath adapts the 1.5 adapter.ConnectionOwner (ProcessPaths []string)
+// to the single-path checks of this smoke test.
+func ownerFirstPath(info *adapter.ConnectionOwner) string {
+	if info == nil || len(info.ProcessPaths) == 0 {
+		return ""
+	}
+	return info.ProcessPaths[0]
 }

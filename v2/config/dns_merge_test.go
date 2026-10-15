@@ -149,7 +149,7 @@ func TestMierusMultiValidate(t *testing.T) {
 	if len(opts.Outbounds) != 2 {
 		t.Fatalf("want 2 outbounds, got %d", len(opts.Outbounds))
 	}
-	if err := libbox.CheckConfigOptions(opts); err != nil {
+	if err := config.CheckConfigOptions(ctx, opts); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -180,7 +180,7 @@ func TestLXNewTypesParseAndValidate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %s: %v", raw, err)
 		}
-		if err := libbox.CheckConfigOptions(opts); err != nil {
+		if err := config.CheckConfigOptions(ctx, opts); err != nil {
 			t.Fatalf("validate %s: %v", raw, err)
 		}
 	}
