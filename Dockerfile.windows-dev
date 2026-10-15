@@ -1,7 +1,9 @@
 # Local-dev Windows core build (pathology-core.dll + PathologyCli.exe) in a
 # container — used when the host cgo toolchain is broken or mixed.
 #
-# NOT for CI/release: output lands in pathology-core/bin-docker/ via bind mount.
+# NOT for CI/release: output lands in pathology-core/$OUT_DIR (default
+# bin-docker/) via bind mount. The local build script sets OUT_DIR=bin when no
+# client is running, so a Flutter build can pick the fresh DLL up immediately.
 #
 # Build context must be the REPO ROOT (the core replaces the engine by relative
 # path ../vendor/sing-box-pathology):
@@ -23,25 +25,26 @@ ENV GOOS=windows GOARCH=amd64 CGO_ENABLED=1 \
 
 WORKDIR /src/pathology-core
 
-# Mirrors build_windows.bat, but stages into bin-docker/ (never bin/ — the
-# running client must not lose its DLL mid-flight).
+# Mirrors build_windows.bat, but stages into $OUT_DIR (never overwrites a live
+# bin/ unless the caller asked for it).
 CMD ["/bin/bash", "-c", "\
   set -e; \
+  OUT=${OUT_DIR:-bin-docker}; \
   TAGS=$(grep -v '^#' build_tags.txt | tr -d '\r' | grep -v '^$' | paste -sd, -); \
-  mkdir -p bin-docker; \
-  echo \"[docker] tags: $TAGS\"; \
+  mkdir -p \"$OUT\"; \
+  echo \"[docker] tags: $TAGS, out: $OUT\"; \
   echo '[docker] building pathology-core.dll...'; \
   go build -trimpath -tags \"$TAGS,with_purego\" -buildmode=c-shared \
-    -ldflags='-w -s -checklinkname=0' -o bin-docker/pathology-core.dll ./platform/desktop; \
+    -ldflags='-w -s -checklinkname=0' -o \"$OUT/pathology-core.dll\" ./platform/desktop; \
   echo '[docker] building PathologyCli.exe...'; \
-  cp -f bin-docker/pathology-core.dll pathology-core.dll; \
+  cp -f \"$OUT/pathology-core.dll\" pathology-core.dll; \
   CGO_LDFLAGS=pathology-core.dll \
   go build -trimpath -tags \"$TAGS,with_purego\" \
-    -ldflags='-w -s -checklinkname=0' -o bin-docker/PathologyCli.exe ./cmd/bydll; \
+    -ldflags='-w -s -checklinkname=0' -o \"$OUT/PathologyCli.exe\" ./cmd/bydll; \
   rm -f pathology-core.dll; \
   CRONET_DIR=$(go list -m -f '{{.Dir}}' github.com/sagernet/cronet-go/lib/windows_amd64 2>/dev/null || true); \
-  if [ -n \"$CRONET_DIR\" ] && [ -f \"$CRONET_DIR/libcronet.dll\" ]; then cp -f \"$CRONET_DIR/libcronet.dll\" bin-docker/; \
-  elif [ -f bin/libcronet.dll ]; then cp -f bin/libcronet.dll bin-docker/; \
-  else echo '[docker] WARN: libcronet.dll not found (copy it into bin-docker/ before running the app)'; fi; \
-  echo '[docker] done: bin-docker/' \
+  if [ -n \"$CRONET_DIR\" ] && [ -f \"$CRONET_DIR/libcronet.dll\" ]; then cp -f \"$CRONET_DIR/libcronet.dll\" \"$OUT/\"; \
+  elif [ -f bin/libcronet.dll ] && [ \"$OUT\" != \"bin\" ]; then cp -f bin/libcronet.dll \"$OUT/\"; \
+  else echo '[docker] WARN: libcronet.dll not found'; fi; \
+  echo \"[docker] done: $OUT/\" \
 "]
