@@ -13,7 +13,13 @@ func isWarpManagedTag(tag string) bool {
 
 func isNonLeafOutboundType(typ string) bool {
 	switch typ {
-	case C.TypeSelector, C.TypeURLTest, C.TypeBalancer, C.TypeBlock, C.TypeDNS, C.TypeDirect, "custom":
+	case C.TypeSelector, C.TypeURLTest, C.TypeBalancer, C.TypeBlock, C.TypeDNS, C.TypeDirect, "custom",
+		// Group wrappers (1.5): detour-on-wrapper is meaningless; they are
+		// valid chain TARGETS (they live in the known-exit set), never members.
+		C.TypeFailover, C.TypeScatter,
+		// Reverse provider: side-channel, not user-traffic — the CP pins its
+		// transport detour at compile time.
+		C.TypePunnel:
 		return true
 	default:
 		return false

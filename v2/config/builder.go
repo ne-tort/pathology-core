@@ -211,6 +211,22 @@ func setOutbounds(options *option.Options, input *option.Options, opt *ClientOpt
 			}
 			outbounds = append(outbounds, out)
 			continue
+		case C.TypePathology:
+			// Legend parent: box.ExpandPathologyOutbounds replaces it with
+			// {parent}-{legend} virtuals at engine start, so the parent tag
+			// must not land in lowest/balance (same dangling-dependency trap
+			// as punnel). A pathology outbound WITHOUT legends is a plain leaf.
+			if po, ok := out.Options.(*option.PathologyOutboundOptions); ok && po != nil && len(po.Legends) > 0 {
+				outbounds = append(outbounds, out)
+				continue
+			}
+			if contains([]string{"direct", "bypass", "block"}, out.Tag) {
+				continue
+			}
+			if !strings.Contains(out.Tag, "§hide§") && !isOutboundDisabled(out.Tag, opt.DisabledOutboundTags) {
+				tags = append(tags, out.Tag)
+			}
+			outbounds = append(outbounds, out)
 		default:
 
 			if contains([]string{"direct", "bypass", "block"}, out.Tag) {
