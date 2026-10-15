@@ -21,3 +21,6 @@ node_modules
 
 # local TestEngine windows regression workdirs
 v2/hcore/testdata/te_win*/
+
+# local docker dev build output (scripts/build_local_1.5.ps1)
+bin-docker/
