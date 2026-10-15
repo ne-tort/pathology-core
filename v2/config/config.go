@@ -65,8 +65,10 @@ func ReadSingOptions(ctx context.Context, opt *ReadOptions) (*option.Options, er
 	var root map[string]interface{}
 	if jsonErr := json.Unmarshal(content, &root); jsonErr == nil {
 		if warnings := MigrateLegacyJSON(root); len(warnings) > 0 {
+			warns := parseWarningsFrom(ctx)
 			for _, w := range warnings {
 				fmt.Printf("[SingboxParser] start-path migrate 1.4→1.5: %s\n", w)
+				warns.addMigration(w)
 			}
 			if migrated, mErr := json.Marshal(root); mErr == nil {
 				content = migrated

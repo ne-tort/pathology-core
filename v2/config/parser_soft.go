@@ -27,10 +27,12 @@ func filterValidLeavesJSON(ctx context.Context, content []byte, filterInbounds b
 	// trusttunnel legacy TLS, route action "direct", legacy vision flow).
 	// Rewrite them up front so one legacy leaf does not fail the whole import.
 	changed := false
+	warns := parseWarningsFrom(ctx)
 	if warnings := MigrateLegacyJSON(root); len(warnings) > 0 {
 		changed = true
 		for _, w := range warnings {
 			fmt.Printf("[SingboxParser] migrate 1.4→1.5: %s\n", w)
+			warns.addMigration(w)
 		}
 	}
 
@@ -116,6 +118,7 @@ func countProtocolLeaves(items []interface{}) int {
 func filterOutboundLeaves(ctx context.Context, items []interface{}) []interface{} {
 	var leaves []interface{}
 	var groups []interface{}
+	warns := parseWarningsFrom(ctx)
 
 	for _, item := range items {
 		m, ok := item.(map[string]interface{})
@@ -132,12 +135,14 @@ func filterOutboundLeaves(ctx context.Context, items []interface{}) []interface{
 		}
 		if !outboundTypeRegistered(typ) {
 			fmt.Printf("[SingboxParser] skip unknown outbound type %q tag=%q\n", typ, leafTag(m))
+			warns.addDrop("outbound", typ, leafTag(m), fmt.Sprintf("unknown type %q", typ))
 			continue
 		}
 		if ok, reason := checkOutboundLeaf(ctx, m); ok {
 			leaves = append(leaves, item)
 		} else {
 			fmt.Printf("[SingboxParser] skip invalid outbound type=%q tag=%q: %v\n", typ, leafTag(m), reason)
+			warns.addDrop("outbound", typ, leafTag(m), reason)
 		}
 	}
 
@@ -158,6 +163,7 @@ func filterOutboundLeaves(ctx context.Context, items []interface{}) []interface{
 		typ := leafType(m)
 		if !outboundTypeRegistered(typ) {
 			fmt.Printf("[SingboxParser] skip unknown outbound group type %q tag=%q\n", typ, leafTag(m))
+			warns.addDrop("group", typ, leafTag(m), fmt.Sprintf("unknown group type %q", typ))
 			continue
 		}
 		if ok, reason := checkOutboundGroup(ctx, m, pool, tagSet); ok {
@@ -166,6 +172,7 @@ func filterOutboundLeaves(ctx context.Context, items []interface{}) []interface{
 			tagSet = leafTagSet(pool)
 		} else {
 			fmt.Printf("[SingboxParser] skip invalid outbound group type=%q tag=%q: %v\n", typ, leafTag(m), reason)
+			warns.addDrop("group", typ, leafTag(m), reason)
 		}
 	}
 
@@ -174,6 +181,7 @@ func filterOutboundLeaves(ctx context.Context, items []interface{}) []interface{
 
 func filterEndpointLeaves(ctx context.Context, items []interface{}) []interface{} {
 	out := make([]interface{}, 0, len(items))
+	warns := parseWarningsFrom(ctx)
 	for _, item := range items {
 		m, ok := item.(map[string]interface{})
 		if !ok {
@@ -185,12 +193,14 @@ func filterEndpointLeaves(ctx context.Context, items []interface{}) []interface{
 		}
 		if !endpointTypeRegistered(typ) {
 			fmt.Printf("[SingboxParser] skip unknown endpoint type %q tag=%q\n", typ, leafTag(m))
+			warns.addDrop("endpoint", typ, leafTag(m), fmt.Sprintf("unknown type %q", typ))
 			continue
 		}
 		if ok, reason := checkEndpointLeaf(ctx, m); ok {
 			out = append(out, item)
 		} else {
 			fmt.Printf("[SingboxParser] skip invalid endpoint type=%q tag=%q: %v\n", typ, leafTag(m), reason)
+			warns.addDrop("endpoint", typ, leafTag(m), reason)
 		}
 	}
 	return out
@@ -198,6 +208,7 @@ func filterEndpointLeaves(ctx context.Context, items []interface{}) []interface{
 
 func filterInboundLeaves(ctx context.Context, items []interface{}) []interface{} {
 	out := make([]interface{}, 0, len(items))
+	warns := parseWarningsFrom(ctx)
 	for _, item := range items {
 		m, ok := item.(map[string]interface{})
 		if !ok {
@@ -209,12 +220,14 @@ func filterInboundLeaves(ctx context.Context, items []interface{}) []interface{}
 		}
 		if !inboundTypeRegistered(typ) {
 			fmt.Printf("[SingboxParser] skip unknown inbound type %q tag=%q\n", typ, leafTag(m))
+			warns.addDrop("inbound", typ, leafTag(m), fmt.Sprintf("unknown type %q", typ))
 			continue
 		}
 		if ok, reason := checkInboundLeaf(ctx, m); ok {
 			out = append(out, item)
 		} else {
 			fmt.Printf("[SingboxParser] skip invalid inbound type=%q tag=%q: %v\n", typ, leafTag(m), reason)
+			warns.addDrop("inbound", typ, leafTag(m), reason)
 		}
 	}
 	return out

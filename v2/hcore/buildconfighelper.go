@@ -47,6 +47,10 @@ func Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
 		StopAndAlert(MessageType_UNEXPECTED_ERROR, err.Error())
 	})
 
+	// Aggregate soft-parse drops / 1.4→1.5 migrations for the UI snackbar; the
+	// summary rides ParseResponse.Message (empty on OK before this change).
+	ctx, parseWarnings := config.WithParseWarnings(ctx)
+
   if static.ClientOptions == nil {
 		static.ClientOptions = config.DefaultClientOptions()
 	}
@@ -119,6 +123,7 @@ func Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
 		return &ParseResponse{
 			ResponseCode: hcommon.ResponseCode_OK,
 			Content:      string(built),
+			Message:      parseWarnings.MessageJSON(),
 		}, nil
 	}
 
@@ -152,7 +157,7 @@ func Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
 	return &ParseResponse{
 		ResponseCode: hcommon.ResponseCode_OK,
 		Content:      string(parsed),
-		Message:      "",
+		Message:      parseWarnings.MessageJSON(),
 	}, nil
 }
 
