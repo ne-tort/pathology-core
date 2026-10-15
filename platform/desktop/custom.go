@@ -78,12 +78,21 @@ func emptyOrErrorC(err error) *C.char {
 }
 
 //export setup
-func setup(baseDir *C.char, workingDir *C.char, tempDir *C.char, mode C.int, listen *C.char, secret *C.char, statusPort C.longlong, debug bool) *C.char {
+func setup(baseDir *C.char, workingDir *C.char, tempDir *C.char, mode C.int, listen *C.char, secret *C.char, statusPort C.longlong, debug bool) (ret *C.char) {
 	// runtime.LockOSThread()
 	// defer runtime.UnlockOSThread()
 
 	// // Ensure signals are initialized
 	// C.init_signals()
+
+	// In-process DLL: an unrecovered panic here aborts the whole UI process.
+	var err error
+	defer func() {
+		hcore.RecoverExportErr("desktop.setup", &err)
+		if err != nil && ret == nil {
+			ret = emptyOrErrorC(err)
+		}
+	}()
 
 	params := hcore.SetupRequest{
 		BasePath:          C.GoString(baseDir),
@@ -96,7 +105,7 @@ func setup(baseDir *C.char, workingDir *C.char, tempDir *C.char, mode C.int, lis
 		Secret:            C.GoString(secret),
 	}
 
-	err := hcore.Setup(&params, nil)
+	err = hcore.Setup(&params, nil)
 	return emptyOrErrorC(err)
 }
 
@@ -108,11 +117,18 @@ func freeString(str *C.char) {
 }
 
 //export start
-func start(configPath *C.char, disableMemoryLimit bool) *C.char {
+func start(configPath *C.char, disableMemoryLimit bool) (ret *C.char) {
 	// runtime.LockOSThread()
 	// defer runtime.UnlockOSThread()
+	var err error
+	defer func() {
+		hcore.RecoverExportErr("desktop.start", &err)
+		if err != nil && ret == nil {
+			ret = emptyOrErrorC(err)
+		}
+	}()
 	ctx := libbox.BaseContext(nil)
-	_, err := hcore.Start(ctx, &hcore.StartRequest{
+	_, err = hcore.Start(ctx, &hcore.StartRequest{
 		ConfigPath:             C.GoString(configPath),
 		EnableOldCommandServer: true,
 		DisableMemoryLimit:     bool(disableMemoryLimit),
@@ -121,25 +137,40 @@ func start(configPath *C.char, disableMemoryLimit bool) *C.char {
 }
 
 //export stop
-func stop() *C.char {
+func stop() (ret *C.char) {
 	// runtime.LockOSThread()
 	// defer runtime.UnlockOSThread()
 
-	_, err := hcore.Stop()
+	var err error
+	defer func() {
+		hcore.RecoverExportErr("desktop.stop", &err)
+		if err != nil && ret == nil {
+			ret = emptyOrErrorC(err)
+		}
+	}()
+	_, err = hcore.Stop()
 	return emptyOrErrorC(err)
 }
 
 //export healStickyTun
 func healStickyTun() {
+	defer hcore.RecoverExport("desktop.healStickyTun")
 	hutils.HealStickyTun()
 }
 
 //export restart
-func restart(configPath *C.char, disableMemoryLimit bool) *C.char {
+func restart(configPath *C.char, disableMemoryLimit bool) (ret *C.char) {
 	// runtime.LockOSThread()
 	// defer runtime.UnlockOSThread()
+	var err error
+	defer func() {
+		hcore.RecoverExportErr("desktop.restart", &err)
+		if err != nil && ret == nil {
+			ret = emptyOrErrorC(err)
+		}
+	}()
 	ctx := libbox.BaseContext(nil)
-	_, err := hcore.Restart(ctx, &hcore.StartRequest{
+	_, err = hcore.Restart(ctx, &hcore.StartRequest{
 		ConfigPath:             C.GoString(configPath),
 		EnableOldCommandServer: true,
 		DisableMemoryLimit:     bool(disableMemoryLimit),
@@ -168,7 +199,14 @@ func AddGrpcClientPublicKey(clientPublicKey *C.char) *C.char {
 }
 
 //export startTray
-func startTray(uiExe *C.char, basePath *C.char, lang *C.char) *C.char {
+func startTray(uiExe *C.char, basePath *C.char, lang *C.char) (ret *C.char) {
+	defer func() {
+		var err error
+		hcore.RecoverExportErr("desktop.startTray", &err)
+		if err != nil && ret == nil {
+			ret = emptyOrErrorC(err)
+		}
+	}()
 	coretray.StartTray(coretray.Options{
 		UIExe:       C.GoString(uiExe),
 		BasePath:    C.GoString(basePath),
@@ -183,5 +221,6 @@ func closeGrpc(mode C.int) {
 	// runtime.LockOSThread()
 	// defer runtime.UnlockOSThread()
 
+	defer hcore.RecoverExport("desktop.closeGrpc")
 	hcore.Close(hcore.SetupMode(mode))
 }

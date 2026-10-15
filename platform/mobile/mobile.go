@@ -28,7 +28,7 @@ type SetupOptions struct {
 }
 
 func Setup(opt *SetupOptions, platformInterface libbox.PlatformInterface) (err error) {
-	defer hcore.RecoverExportErr("Setup", &err)
+	defer hcore.RecoverExportErr("mobile.Setup", &err)
 	if err = hcore.Setup(&hcore.SetupRequest{
 		BasePath:          opt.BasePath,
 		WorkingDir:        opt.WorkingDir,
@@ -59,7 +59,7 @@ func Setup(opt *SetupOptions, platformInterface libbox.PlatformInterface) (err e
 // }
 
 func Start(configPath string, configContent string) (err error) {
-	defer hcore.RecoverExportErr("Start", &err)
+	defer hcore.RecoverExportErr("mobile.Start", &err)
 	_, err = hcore.StartService(libbox.BaseContext(nil), &hcore.StartRequest{
 		ConfigPath:    configPath,
 		ConfigContent: configContent,
@@ -68,23 +68,23 @@ func Start(configPath string, configContent string) (err error) {
 }
 
 func Stop() (err error) {
-	defer hcore.RecoverExportErr("Stop", &err)
+	defer hcore.RecoverExportErr("mobile.Stop", &err)
 	_, err = hcore.Stop()
 	return err
 }
 
 func GetServerPublicKey() (out []byte) {
-	defer hcore.RecoverExport("GetServerPublicKey")
+	defer hcore.RecoverExport("mobile.GetServerPublicKey")
 	return hcore.GetGrpcServerPublicKey()
 }
 
 func AddGrpcClientPublicKey(clientPublicKey []byte) (err error) {
-	defer hcore.RecoverExportErr("AddGrpcClientPublicKey", &err)
+	defer hcore.RecoverExportErr("mobile.AddGrpcClientPublicKey", &err)
 	return hcore.AddGrpcClientPublicKey(clientPublicKey)
 }
 
 func Close(mode int) {
-	defer hcore.RecoverExport("Close")
+	defer hcore.RecoverExport("mobile.Close")
 	hcore.Close(hcore.SetupMode(mode))
 }
 
@@ -93,16 +93,16 @@ func Test() string {
 }
 
 func Pause() {
-	defer hcore.RecoverExport("Pause")
+	defer hcore.RecoverExport("mobile.Pause")
 	hcore.Pause()
 }
 
 func Wake() {
-	defer hcore.RecoverExport("Wake")
+	defer hcore.RecoverExport("mobile.Wake")
 	hcore.Wake()
 }
 
 func ResetNetwork() {
-	defer hcore.RecoverExport("ResetNetwork")
+	defer hcore.RecoverExport("mobile.ResetNetwork")
 	hcore.ResetNetwork()
 }

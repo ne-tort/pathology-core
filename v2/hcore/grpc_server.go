@@ -64,9 +64,13 @@ func grpcKeepaliveOptions() []grpc.ServerOption {
 	}
 }
 
-func Setup(params *SetupRequest, platformInterface libbox.PlatformInterface) error {
-	defer config.DeferPanicToError("setup", func(err error) {
-		Log(LogLevel_FATAL, LogType_CORE, err.Error())
+func Setup(params *SetupRequest, platformInterface libbox.PlatformInterface) (err error) {
+	// Named return: the panic guard must surface the failure to the caller —
+	// an unnamed return reported nil (false success; only the desktop
+	// hello-probe caught it, 5s later and with a wrong reason).
+	defer config.DeferPanicToError("setup", func(e error) {
+		err = e
+		Log(LogLevel_FATAL, LogType_CORE, e.Error())
 		<-time.After(5 * time.Second)
 	})
 	if params.Debug {
