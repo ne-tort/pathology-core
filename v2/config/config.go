@@ -2,6 +2,8 @@ package config
 
 import (
 	context "context"
+	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -55,6 +57,21 @@ func ReadSingOptions(ctx context.Context, opt *ReadOptions) (*option.Options, er
 	content, err := ReadContent(ctx, opt)
 	if err != nil {
 		return nil, err
+	}
+	// Start path: profile files compiled under 1.4 may still carry legacy keys
+	// (chrome_parrot, hy bandwidth, action direct, …) that 1.5 hard-rejects.
+	// The import path migrates via filterValidLeavesJSON; do the same here so a
+	// stale-but-valid profile cannot fail engine startup.
+	var root map[string]interface{}
+	if jsonErr := json.Unmarshal(content, &root); jsonErr == nil {
+		if warnings := MigrateLegacyJSON(root); len(warnings) > 0 {
+			for _, w := range warnings {
+				fmt.Printf("[SingboxParser] start-path migrate 1.4→1.5: %s\n", w)
+			}
+			if migrated, mErr := json.Marshal(root); mErr == nil {
+				content = migrated
+			}
+		}
 	}
 	var options option.Options
 	err = options.UnmarshalJSONContext(ctx, content)

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/sagernet/sing-box/experimental/libbox"
 )
 
 func migrateDoc(t *testing.T, raw string) (map[string]interface{}, []string) {
@@ -227,5 +229,19 @@ func TestMigrateThenSoftFilterKeepsLegacyLeaf(t *testing.T) {
 	hy2 := list[1].(map[string]interface{})
 	if hy2["brutal_mbps"] != float64(100) || hy2["congestion_control"] != "brutal" {
 		t.Fatalf("hy2 not migrated: %v", hy2)
+	}
+}
+
+// Start path: a stale profile with 1.4-era keys must still read under the 1.5
+// engine (ReadSingOptions migrates before unmarshal).
+func TestReadSingOptionsMigratesLegacyContent(t *testing.T) {
+	content := `{"log":{"level":"warn"},"outbounds":[{"type":"direct","tag":"direct"}],
+		"route":{"final":"direct","rules":[{"action":"direct"}]}}`
+	opts, err := ReadSingOptions(libbox.BaseContext(nil), &ReadOptions{Content: content})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Route == nil || len(opts.Route.Rules) == 0 {
+		t.Fatal("route rules lost")
 	}
 }
