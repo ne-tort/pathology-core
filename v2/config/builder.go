@@ -11,8 +11,8 @@ import (
 	sync "sync"
 	"time"
 
-	"github.com/ne-tort/pathology-core/v2/hutils"
 	mDNS "github.com/miekg/dns"
+	"github.com/ne-tort/pathology-core/v2/hutils"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/auth"
@@ -321,10 +321,14 @@ func setOutbounds(options *option.Options, input *option.Options, opt *ClientOpt
 
 	// TestMode (side TestEngine): omit balancers; select = leaves only.
 	if opt.TestMode {
-		selectTags := tags
+		// rotationTags join the probe pool too: the legend-set group (and the
+		// virtuals behind it) must be visible to the TestEngine, otherwise a
+		// pathology-only profile probes an empty pool here.
+		selectTags := append([]string{}, tags...)
+		selectTags = append(selectTags, rotationTags...)
 		if slim := strings.TrimSpace(opt.TestOutboundTag); slim != "" {
 			found := false
-			for _, t := range tags {
+			for _, t := range selectTags {
 				if t == slim {
 					found = true
 					break
@@ -447,7 +451,11 @@ func setOutbounds(options *option.Options, input *option.Options, opt *ClientOpt
 
 	// Traffic path: route.final → select → (balance|lowest|node) → nodes.
 	// Keep final on select so UI/SelectOutbound can switch modes and nodes.
-	if len(tags) == 0 {
+	// rotationTags counts as selectable output: a pathology legend parent is not
+	// a leaf (the engine expands it into {parent}-{legend} virtuals), so a
+	// pathology-only profile would otherwise fall into the Direct-fallback guard
+	// and refuse to build.
+	if len(tags) == 0 && len(rotationTags) == 0 {
 		// Never silently turn a VPN profile into Direct. Only allow Direct-only
 		// when the input itself had no proxy leaves (explicit Direct / empty stub).
 		if n := countInputProxyLeaves(input); n > 0 {
@@ -496,6 +504,10 @@ func setOutbounds(options *option.Options, input *option.Options, opt *ClientOpt
 	if len(tags) > 1 {
 		selectorTags = append([]string{urlTest.Tag, balancer.Tag}, selectorTags...)
 		defaultSelect = balancer.Tag // auto load-balance until user picks otherwise
+	}
+	if defaultSelect == "" && len(rotationTags) > 0 {
+		// pathology-only profile: the rotation group is the only dialable exit.
+		defaultSelect = rotationTags[0]
 	}
 	if preferred != "" {
 		defaultSelect = preferred // explicit §default§ wins over auto balance
@@ -618,6 +630,7 @@ func setLog(options *option.Options, opt *ClientOptions) {
 		DisableColor: true,
 	}
 }
+
 // hasUsableGlobalIPv6 reports a non-loopback, non-link-local IPv6 on an UP iface.
 // Used for IPv6 leaf filtering so UI and connect stay aligned (loopback alone is not enough).
 // Excludes Teredo / 6to4 / ULA — same policy as Flutter OsIpv6 (Windows Teredo ≠ WAN IPv6).
@@ -1113,7 +1126,7 @@ func setRoutingOptions(options *option.Options, input *option.Options, hopt *Cli
 						},
 					},
 					DNSRuleAction: option.DNSRuleAction{
-						Action:       C.RuleActionTypeRoute,
+						Action: C.RuleActionTypeRoute,
 						// No Legacy strategy: incompatible with query_type in sing-box 1.14.
 						RouteOptions: dnsRouteAction(DNSFakeTag, 0, &DEFAULT_DNS_TTL, true),
 					},
@@ -1148,7 +1161,6 @@ func setRoutingOptions(options *option.Options, input *option.Options, hopt *Cli
 
 	return nil
 }
-
 
 var (
 	ipMaps      = map[string][]string{}

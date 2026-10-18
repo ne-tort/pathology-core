@@ -135,10 +135,51 @@ func parseConfigContent(ctx context.Context, content []byte, debug bool, configO
 
 	v2ray, err := ray2sing.Ray2SingboxOptions(ctx, string(content), false)
 	if err == nil {
+		// ray2sing emits 1.4-era keys (chrome_parrot, hy bandwidth, action direct,
+		// …) that the 1.5 engine hard-rejects; run the same migration the JSON and
+		// Clash paths get, instead of handing the raw conversion to the parser.
+		if migrated, mErr := migrateOptionsJSON(ctx, v2ray); mErr != nil {
+			return nil, fmt.Errorf("[V2rayParser] migrate 1.4→1.5: %w", mErr)
+		} else if migrated != nil {
+			v2ray = migrated
+		}
 		return patchConfigOptions(ctx, v2ray, "V2rayParser", configOpt, fullConfig)
 	}
 
 	return nil, fmt.Errorf("unable to determine config format")
+}
+
+// migrateOptionsJSON round-trips an already-converted option.Options through the
+// legacy migrator. Returns nil (and no error) when the document does not decode
+// to a JSON object, so the caller keeps the original value.
+func migrateOptionsJSON(ctx context.Context, options *option.Options) (*option.Options, error) {
+	if options == nil {
+		return nil, nil
+	}
+	raw, err := options.MarshalJSONContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var root map[string]interface{}
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return nil, nil
+	}
+	if warnings := MigrateLegacyJSON(root); len(warnings) > 0 {
+		warns := parseWarningsFrom(ctx)
+		for _, w := range warnings {
+			fmt.Printf("[SingboxParser] v2ray migrate 1.4→1.5: %s\n", w)
+			warns.addMigration(w)
+		}
+	}
+	migratedRaw, err := json.Marshal(root)
+	if err != nil {
+		return nil, err
+	}
+	migrated := &option.Options{}
+	if err := migrated.UnmarshalJSONContext(ctx, migratedRaw); err != nil {
+		return nil, err
+	}
+	return migrated, nil
 }
 
 func patchConfigStr(ctx context.Context, content []byte, name string, configOpt *ClientOptions, fullConfig bool) (*option.Options, error) {

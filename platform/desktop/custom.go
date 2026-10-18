@@ -179,22 +179,40 @@ func restart(configPath *C.char, disableMemoryLimit bool) (ret *C.char) {
 }
 
 //export GetServerPublicKey
-func GetServerPublicKey() *C.char {
+func GetServerPublicKey() (ret *C.char) {
 	// runtime.LockOSThread()
 	// defer runtime.UnlockOSThread()
+
+	// In-process DLL: an unrecovered panic here aborts the whole UI process.
+	defer func() {
+		var err error
+		hcore.RecoverExportErr("desktop.getServerPublicKey", &err)
+		if err != nil && ret == nil {
+			ret = emptyOrErrorC(err)
+		}
+	}()
 
 	publicKey := hcore.GetGrpcServerPublicKey()
 	return C.CString(string(publicKey)) // Return as C string, caller must free
 }
 
 //export AddGrpcClientPublicKey
-func AddGrpcClientPublicKey(clientPublicKey *C.char) *C.char {
+func AddGrpcClientPublicKey(clientPublicKey *C.char) (ret *C.char) {
 	// runtime.LockOSThread()
 	// defer runtime.UnlockOSThread()
 
+	// In-process DLL: an unrecovered panic here aborts the whole UI process.
+	var err error
+	defer func() {
+		hcore.RecoverExportErr("desktop.addGrpcClientPublicKey", &err)
+		if err != nil && ret == nil {
+			ret = emptyOrErrorC(err)
+		}
+	}()
+
 	// Convert C string to Go byte slice
 	clientKey := C.GoBytes(unsafe.Pointer(clientPublicKey), C.int(len(C.GoString(clientPublicKey))))
-	err := hcore.AddGrpcClientPublicKey(clientKey)
+	err = hcore.AddGrpcClientPublicKey(clientKey)
 	return emptyOrErrorC(err)
 }
 

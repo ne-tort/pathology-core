@@ -24,6 +24,8 @@ func MigrateLegacyJSON(root map[string]interface{}) []string {
 	var warnings []string
 	walkMaps(root, func(m map[string]interface{}) {
 		migrateParrotKeys(m, &warnings)
+		migratePadProfile(m, &warnings)
+		migrateNestedHysteriaBandwidth(m, &warnings)
 	})
 	for _, listKey := range []string{"outbounds", "endpoints", "inbounds"} {
 		list, _ := root[listKey].([]interface{})
@@ -37,24 +39,34 @@ func MigrateLegacyJSON(root map[string]interface{}) []string {
 				migrateHysteriaBandwidth(m, &warnings)
 				migrateImplicitTLS(m, &warnings)
 			case "trusttunnel":
-				migrateTrustTunnel(m, &warnings)
+				migrateTrustTunnel(m, listKey == "inbounds", &warnings)
 			case "vless":
 				migrateVLESSFlow(m, &warnings)
 			case "tuic", "anytls", "naive":
 				migrateImplicitTLS(m, &warnings)
 			}
-			if leafType(m) == "masque" && listKey == "outbounds" {
+			if leafType(m) == "masque" {
 				m["type"] = "warpsque"
-				warnings = append(warnings, fmt.Sprintf("outbound %q: type masque renamed to warpsque", leafTag(m)))
+				warnings = append(warnings, fmt.Sprintf("%s %q: type masque renamed to warpsque", listKey[:len(listKey)-1], leafTag(m)))
 			}
 			if leafType(m) == "mesh_underlay" {
-				warnings = append(warnings, fmt.Sprintf("outbound %q: mesh_underlay was removed in 1.5 (use a tlspoint endpoint); the leaf will fail validation and be dropped", leafTag(m)))
+				// Rewrite to an unknown sentinel so the pass is idempotent: the
+				// leaf still fails validation and is dropped by the soft filter
+				// (with its own drop warning), but a second run sees no
+				// mesh_underlay and stays silent instead of repeating the warning.
+				m["type"] = meshUnderlayDroppedType
+				warnings = append(warnings, fmt.Sprintf("%s %q: mesh_underlay was removed in 1.5 (use a tlspoint endpoint); the leaf will fail validation and be dropped", listKey[:len(listKey)-1], leafTag(m)))
 			}
 		}
 	}
 	migrateRouteDirectAction(root, &warnings)
 	return warnings
 }
+
+// meshUnderlayDroppedType replaces a 1.4 mesh_underlay leaf type. It is not a
+// registered type, so the soft filter drops the leaf exactly as the original
+// would have, and the migrator no longer recognises it on a second pass.
+const meshUnderlayDroppedType = "mesh_underlay_removed_in_1_5"
 
 // walkMaps visits every nested map in a decoded JSON value.
 func walkMaps(v interface{}, visit func(map[string]interface{})) {
@@ -97,11 +109,18 @@ func migrateParrotKeys(m map[string]interface{}, warnings *[]string) {
 		return
 	}
 	if existing, ok := m["utls"].(map[string]interface{}); ok {
-		if _, set := existing["fingerprint"]; !set {
-			existing["enabled"] = true
-			existing["fingerprint"] = fp
-			*warnings = append(*warnings, "legacy QUIC parrot key migrated to utls.fingerprint="+fp)
+		cur, hasFP := existing["fingerprint"]
+		// "none" is the documented way of saying "not set" (sing-box migrates
+		// the zero value to it), so a parrot key must still override that.
+		if hasFP && cur != nil && strings.TrimSpace(fmt.Sprint(cur)) != "" && strings.TrimSpace(fmt.Sprint(cur)) != "none" {
+			// A real fingerprint is already configured: the parrot key is dead
+			// weight, drop it but don't pretend we changed the persona.
+			*warnings = append(*warnings, "legacy QUIC parrot key dropped (utls.fingerprint already set)")
+			return
 		}
+		existing["enabled"] = true
+		existing["fingerprint"] = fp
+		*warnings = append(*warnings, "legacy QUIC parrot key migrated to utls.fingerprint="+fp)
 		return
 	}
 	m["utls"] = map[string]interface{}{"enabled": true, "fingerprint": fp}
@@ -127,46 +146,107 @@ func migrateHysteriaBandwidth(m map[string]interface{}, warnings *[]string) {
 	for _, k := range legacyKeys {
 		delete(m, k)
 	}
+	label := fmt.Sprintf("%s %q", leafType(m), leafTag(m))
+	applyHysteriaBandwidthCap(m, up, down, label, warnings)
+}
+
+// applyHysteriaBandwidthCap writes the 1.5 congestion_control/brutal_mbps pair
+// for a legacy up/down bandwidth pair. The engine rejects brutal_mbps unless
+// congestion_control is brutal (option.ValidateQUICCongestion), so an explicit
+// non-brutal CC wins and the legacy cap is dropped with a warning.
+func applyHysteriaBandwidthCap(m map[string]interface{}, up, down int, label string, warnings *[]string) {
 	capMbps := up
 	if down > capMbps {
 		capMbps = down
 	}
-	if capMbps > 0 {
-		if _, set := m["congestion_control"]; !set {
-			m["congestion_control"] = "brutal"
+	cc, _ := m["congestion_control"].(string)
+	cc = strings.TrimSpace(cc)
+	switch {
+	case cc == "brutal":
+		if capMbps > 0 {
+			m["brutal_mbps"] = capMbps
+			*warnings = append(*warnings, fmt.Sprintf("%s: up/down(_mbps) migrated to brutal_mbps=%d", label, capMbps))
 		}
+	case cc == "" && capMbps > 0:
+		m["congestion_control"] = "brutal"
 		m["brutal_mbps"] = capMbps
-		*warnings = append(*warnings, fmt.Sprintf("%s %q: up/down(_mbps) migrated to brutal_mbps=%d", leafType(m), leafTag(m), capMbps))
-	} else {
-		*warnings = append(*warnings, fmt.Sprintf("%s %q: legacy bandwidth keys dropped (no cap set)", leafType(m), leafTag(m)))
+		*warnings = append(*warnings, fmt.Sprintf("%s: up/down(_mbps) migrated to brutal_mbps=%d", label, capMbps))
+	case capMbps > 0:
+		// congestion_control was set explicitly to something other than brutal;
+		// keeping brutal_mbps would fail validation, so the legacy cap is lost.
+		*warnings = append(*warnings, fmt.Sprintf("%s: legacy bandwidth keys dropped (congestion_control=%s is not brutal)", label, cc))
+	default:
+		*warnings = append(*warnings, fmt.Sprintf("%s: legacy bandwidth keys dropped (no cap set)", label))
 	}
 }
 
-// bandwidthMbps parses numeric or "100 Mbps"-style bandwidth values; with
-// several values the maximum wins (up/down pair).
+// bandwidthMbps parses numeric or string bandwidth values ("200", 200,
+// "100 Mbps", "100Mbps", "1 Gbps"); the maximum wins (up/down pair). Values it
+// cannot parse are ignored (0).
 func bandwidthMbps(values ...interface{}) int {
-	max := 0
+	best := 0
 	for _, v := range values {
-		var n int
-		switch t := v.(type) {
-		case float64:
-			n = int(t)
-		case string:
-			fields := strings.Fields(t)
-			if len(fields) == 0 {
-				continue
-			}
-			parsed, err := strconv.Atoi(strings.TrimSuffix(fields[0], ","))
-			if err != nil {
-				continue
-			}
-			n = parsed
-		}
-		if n > max {
-			max = n
+		if n := parseMbpsValue(v); n > best {
+			best = n
 		}
 	}
-	return max
+	return best
+}
+
+func parseMbpsValue(v interface{}) int {
+	switch t := v.(type) {
+	case nil:
+		return 0
+	case int:
+		return t
+	case int32:
+		return int(t)
+	case int64:
+		return int(t)
+	case float32:
+		return int(t)
+	case float64:
+		return int(t)
+	case string:
+		return parseMbpsString(t)
+	}
+	return 0
+}
+
+// parseMbpsString accepts "100 Mbps", "100Mbps", "100mb/s", "1 Gbps", "1.5G".
+func parseMbpsString(s string) int {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return 0
+	}
+	mult := 1.0
+	switch {
+	case strings.HasSuffix(s, "gbps"), strings.HasSuffix(s, "gbit"), strings.HasSuffix(s, "gb/s"):
+		mult = 1000
+		s = strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(s, "gbps"), "gbit"), "gb/s")
+	case strings.HasSuffix(s, "mbps"), strings.HasSuffix(s, "mbit"), strings.HasSuffix(s, "mb/s"):
+		s = strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(s, "mbps"), "mbit"), "mb/s")
+	case strings.HasSuffix(s, "kbps"), strings.HasSuffix(s, "kbit"):
+		s = strings.TrimSuffix(strings.TrimSuffix(s, "kbps"), "kbit")
+		mult = 0.001
+	case strings.HasSuffix(s, "gb"), strings.HasSuffix(s, "g"):
+		s = strings.TrimSuffix(strings.TrimSuffix(s, "gb"), "g")
+		mult = 1000
+	case strings.HasSuffix(s, "mb"), strings.HasSuffix(s, "m"):
+		s = strings.TrimSuffix(strings.TrimSuffix(s, "mb"), "m")
+	case strings.HasSuffix(s, "kb"), strings.HasSuffix(s, "k"):
+		s = strings.TrimSuffix(strings.TrimSuffix(s, "kb"), "k")
+		mult = 0.001
+	}
+	s = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(s), ","))
+	if s == "" {
+		return 0
+	}
+	n, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0
+	}
+	return int(n * mult)
 }
 
 // migrateImplicitTLS: in 1.5 the QUIC/TLS-mandatory protocols
@@ -186,8 +266,10 @@ func migrateImplicitTLS(m map[string]interface{}, warnings *[]string) {
 }
 
 // migrateTrustTunnel: 1.4 trusttunnel had a private TLS block shape; 1.5 uses
-// the standard tls container + root-level QUIC knobs.
-func migrateTrustTunnel(m map[string]interface{}, warnings *[]string) {
+// the standard tls container + root-level QUIC knobs. Inbound trusttunnel
+// rejects remote_id/quic_auth at root (option/trusttunnel_unmarshal.go), so
+// those two are dropped rather than lifted when the leaf is an inbound.
+func migrateTrustTunnel(m map[string]interface{}, isInbound bool, warnings *[]string) {
 	tls, _ := m["tls"].(map[string]interface{})
 	if tls != nil {
 		if v, ok := tls["skip_verification"]; ok {
@@ -206,10 +288,12 @@ func migrateTrustTunnel(m map[string]interface{}, warnings *[]string) {
 		}
 		if v, ok := tls["remote_id"]; ok {
 			delete(tls, "remote_id")
-			if _, set := m["remote_id"]; !set {
+			if isInbound {
+				*warnings = append(*warnings, "trusttunnel inbound tls.remote_id dropped (inbound rejects remote_id)")
+			} else if _, set := m["remote_id"]; !set {
 				m["remote_id"] = v
+				*warnings = append(*warnings, "trusttunnel tls.remote_id → remote_id")
 			}
-			*warnings = append(*warnings, "trusttunnel tls.remote_id → remote_id")
 		}
 	}
 	transport, _ := m["transport"].(map[string]interface{})
@@ -217,6 +301,10 @@ func migrateTrustTunnel(m map[string]interface{}, warnings *[]string) {
 		for _, k := range []string{"utls", "zero_rtt_handshake", "session_tickets", "quic_auth"} {
 			if v, ok := transport[k]; ok {
 				delete(transport, k)
+				if isInbound && k == "quic_auth" {
+					*warnings = append(*warnings, "trusttunnel inbound transport.quic_auth dropped (inbound rejects quic_auth)")
+					continue
+				}
 				if _, set := m[k]; !set {
 					m[k] = v
 				}
@@ -233,6 +321,45 @@ func migrateTrustTunnel(m map[string]interface{}, warnings *[]string) {
 	}
 }
 
+// migratePadProfile: pathologywg/pathology pad_profile was removed in 1.5
+// (hard reject in option/wireguard_pathology.go, hint: use persona + pad_budget).
+// The profiles carry no mechanical translation, so the key is dropped and the
+// leaf falls back to the engine's default persona.
+func migratePadProfile(m map[string]interface{}, warnings *[]string) {
+	if _, ok := m["pad_profile"]; !ok {
+		return
+	}
+	delete(m, "pad_profile")
+	*warnings = append(*warnings, "pathologywg: pad_profile dropped (removed in 1.5; persona/pad_budget take over, default persona applies)")
+}
+
+// migrateNestedHysteriaBandwidth covers hysteria bandwidth keys inside v2ray
+// transports (vless/vmess/trojan method=hysteria), where the engine also
+// hard-rejects RemovedHyMbpsKeys. The top-level leaf case is handled by the
+// caller's type switch; this visitor handles any transport-shaped block.
+func migrateNestedHysteriaBandwidth(m map[string]interface{}, warnings *[]string) {
+	method, _ := m["method"].(string)
+	if strings.ToLower(strings.TrimSpace(method)) != "hysteria" {
+		return
+	}
+	legacyKeys := []string{"up_mbps", "down_mbps", "up", "down"}
+	present := false
+	for _, k := range legacyKeys {
+		if _, ok := m[k]; ok {
+			present = true
+		}
+	}
+	if !present {
+		return
+	}
+	up := bandwidthMbps(m["up_mbps"], m["up"])
+	down := bandwidthMbps(m["down_mbps"], m["down"])
+	for _, k := range legacyKeys {
+		delete(m, k)
+	}
+	applyHysteriaBandwidthCap(m, up, down, "v2ray transport hysteria", warnings)
+}
+
 // migrateVLESSFlow: legacy vision flow names are rejected in 1.5; "xray" is
 // the accepted sugar that the engine expands to tls.shaping.vision.
 func migrateVLESSFlow(m map[string]interface{}, warnings *[]string) {
@@ -246,13 +373,21 @@ func migrateVLESSFlow(m map[string]interface{}, warnings *[]string) {
 
 // migrateRouteDirectAction: route rule action "direct" was removed in 1.5
 // (earlier than upstream); the equivalent is action "route" with the direct
-// outbound tag.
+// outbound tag. Logical rules carry a nested rules[] that must be walked too.
 func migrateRouteDirectAction(root map[string]interface{}, warnings *[]string) {
 	route, _ := root["route"].(map[string]interface{})
 	if route == nil {
 		return
 	}
-	rules, _ := route["rules"].([]interface{})
+	migrateRuleListActionDirect(route["rules"], warnings)
+}
+
+// migrateRuleListActionDirect rewrites action "direct" in a rule list and
+// recurses into logical rules (type "logical"), whose children live under
+// "rules". Without the recursion a legacy "direct" nested in a logical rule
+// survives into the 1.5 parser and fails the whole import.
+func migrateRuleListActionDirect(list interface{}, warnings *[]string) {
+	rules, _ := list.([]interface{})
 	for _, item := range rules {
 		rule, ok := item.(map[string]interface{})
 		if !ok {
@@ -264,6 +399,9 @@ func migrateRouteDirectAction(root map[string]interface{}, warnings *[]string) {
 				rule["outbound"] = "direct"
 			}
 			*warnings = append(*warnings, "route rule: action direct → route + outbound direct")
+		}
+		if nested, ok := rule["rules"]; ok {
+			migrateRuleListActionDirect(nested, warnings)
 		}
 	}
 }

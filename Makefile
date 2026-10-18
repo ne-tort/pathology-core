@@ -8,7 +8,7 @@ CLINAME=PathologyCli
 BRANCH=$(shell git branch --show-current)
 VERSION=$(shell git describe --tags || echo "unknown version")
 # Windows CI uses MinGW make; do not put bare text inside ifeq (missing separator).
-CRONET_GO_VERSION := $(shell cat ../vendor/sing-box-lx/.github/CRONET_GO_VERSION)
+CRONET_GO_VERSION := $(shell cat ../vendor/sing-box-pathology/.github/CRONET_GO_VERSION)
 # Single source of truth: build_tags.txt (see that file for lx / Hiddify rationale).
 # Escape \# so Make does not treat it as a comment inside $(shell ...) (BSD/GNU).
 TAGS=$(shell grep -v '^[[:space:]]*\#' build_tags.txt | grep -v '^[[:space:]]*$$' | tr -d '\r' | head -n1)
