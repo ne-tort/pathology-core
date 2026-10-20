@@ -77,6 +77,21 @@ func runHostServe(cmd *cobra.Command, args []string) {
 		}
 	}()
 
+	setupStart := time.Now()
+	fmt.Fprintf(os.Stderr, "host serve: pid=%d starting setup base=%s working=%s\n", os.Getpid(), hostBasePath, hostWorkingDir)
+
+	// Write the lock BEFORE Setup: the UI's cold-spawn readiness check is
+	// hello + valid lock. Setup binds gRPC midway but keeps initializing
+	// (settings DB, tun heal, services) — with a late lock the UI polls the
+	// full 30s timeout even though the listener is already up, and a slow
+	// tail (e.g. a bloated LevelDB rewrite) surfaced as multi-minute
+	// black-screen startups. An early lock + early bind = attach as soon as
+	// the listener answers.
+	if err := writeCoreHostLock(); err != nil {
+		log.Warn("core host lock:", err)
+	}
+	defer removeCoreHostLock()
+
 	if err := hcore.Setup(
 		&hcore.SetupRequest{
 			BasePath:          hostBasePath,
@@ -90,13 +105,10 @@ func runHostServe(cmd *cobra.Command, args []string) {
 		nil,
 	); err != nil {
 		log.Error("host serve setup failed: ", err)
+		fmt.Fprintf(os.Stderr, "host serve: setup failed after %s: %v\n", time.Since(setupStart), err)
 		os.Exit(1)
 	}
-
-	if err := writeCoreHostLock(); err != nil {
-		log.Warn("core host lock:", err)
-	}
-	defer removeCoreHostLock()
+	fmt.Fprintf(os.Stderr, "host serve: setup done in %s, listening on %s\n", time.Since(setupStart), hostListen)
 
 	fmt.Printf("Core Host listening on %s (Ctrl+C to stop)\n", hostListen)
 
