@@ -145,8 +145,17 @@ func maybeAutoConnectOnHostAutostart() {
 	if !autoConnect {
 		return
 	}
-	if _, err := hcore.SessionConnect(context.Background()); err != nil {
+	resp, err := hcore.SessionConnect(context.Background())
+	if err != nil {
 		log.Warn("auto_connect_on_login start:", err)
+		return
+	}
+	// SessionConnect reports "nothing to connect" (no active profile, missing
+	// direct config, …) as a status message with a nil error. Swallowing that
+	// made a boot-time service look healthy while no tunnel came up: the unit
+	// was active, :17078 answered, and the user saw no VPN and no explanation.
+	if resp != nil && resp.MessageType == hcore.MessageType_ERROR_BUILDING_CONFIG {
+		log.Warn("auto_connect_on_login skipped: ", resp.Message)
 	}
 }
 

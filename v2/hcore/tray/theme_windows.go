@@ -90,3 +90,7 @@ func refreshImmersiveColorPolicyState() {
 	}
 	_, _, _ = proc.Call()
 }
+
+// useLightTrayIcon is a no-op on Windows: the .ico assets carry their own
+// artwork and the taskbar does not tint notification icons.
+func useLightTrayIcon(_ bool) bool { return false }
