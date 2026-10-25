@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -36,6 +37,22 @@ type coreHostLock struct {
 	Version   string `json:"version"`
 	StartedAt string `json:"started_at"`
 	Tray      bool   `json:"tray"`
+}
+
+// exitHostAlreadyRunning is reported when the listen address is taken: another
+// host won the race. Distinct from 1 so the client does not treat a benign
+// double start as a crash.
+const exitHostAlreadyRunning = 3
+
+// isBindConflict reports whether err is "this address is already in use".
+func isBindConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "address already in use") ||
+		strings.Contains(msg, "bind:") ||
+		strings.Contains(msg, "already listening")
 }
 
 var commandHostServe = &cobra.Command{
@@ -78,20 +95,19 @@ func runHostServe(cmd *cobra.Command, args []string) {
 	}()
 
 	setupStart := time.Now()
-	fmt.Fprintf(os.Stderr, "host serve: pid=%d starting setup base=%s working=%s\n", os.Getpid(), hostBasePath, hostWorkingDir)
+	fmt.Fprintf(os.Stderr, "host serve: pid=%d starting setup base=%s working=%s listen=%s\n",
+		os.Getpid(), hostBasePath, hostWorkingDir, hostListen)
 
-	// Write the lock BEFORE Setup: the UI's cold-spawn readiness check is
-	// hello + valid lock. Setup binds gRPC midway but keeps initializing
-	// (settings DB, tun heal, services) — with a late lock the UI polls the
-	// full 30s timeout even though the listener is already up, and a slow
-	// tail (e.g. a bloated LevelDB rewrite) surfaced as multi-minute
-	// black-screen startups. An early lock + early bind = attach as soon as
-	// the listener answers.
-	if err := writeCoreHostLock(); err != nil {
-		log.Warn("core host lock:", err)
-	}
-	defer removeCoreHostLock()
-
+	// The lock is written only *after* Setup succeeded, i.e. after the gRPC
+	// listener is actually bound.
+	//
+	// It used to be written first "so the UI can attach early". That inverted
+	// ownership: a second CLI that lost the bind race still overwrote the
+	// winner's lock with its own pid and listen address, so the UI attached to
+	// an address nobody served. Starting `sudo pathology` while a non-root host
+	// was running produced exactly that — the UI found a lock pointing at a
+	// dead pid, tried to kill it, and died on the resulting detached-process
+	// state. Whoever publishes the lock must own the listener.
 	if err := hcore.Setup(
 		&hcore.SetupRequest{
 			BasePath:          hostBasePath,
@@ -104,10 +120,22 @@ func runHostServe(cmd *cobra.Command, args []string) {
 		},
 		nil,
 	); err != nil {
+		// A lost bind race is an expected, non-fatal outcome: another host is
+		// already serving. Exit quietly with a distinct code so the client can
+		// tell "already running elsewhere" from "crashed".
 		log.Error("host serve setup failed: ", err)
 		fmt.Fprintf(os.Stderr, "host serve: setup failed after %s: %v\n", time.Since(setupStart), err)
+		if isBindConflict(err) {
+			os.Exit(exitHostAlreadyRunning)
+		}
 		os.Exit(1)
 	}
+
+	if err := writeCoreHostLock(); err != nil {
+		log.Warn("core host lock:", err)
+	}
+	defer removeCoreHostLock()
+
 	fmt.Fprintf(os.Stderr, "host serve: setup done in %s, listening on %s\n", time.Since(setupStart), hostListen)
 
 	fmt.Printf("Core Host listening on %s (Ctrl+C to stop)\n", hostListen)
