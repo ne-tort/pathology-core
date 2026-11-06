@@ -1,6 +1,7 @@
 package config
 
 import (
+	"reflect"
 	"strings"
 
 	C "github.com/sagernet/sing-box/constant"
@@ -63,6 +64,17 @@ func NormalizeRouteRule(rule option.Rule) option.Rule {
 		rule.Type = C.RuleTypeDefault
 		rule.DefaultOptions = normalizeDefaultRule(rule.DefaultOptions)
 	case C.RuleTypeLogical:
+		// The logical rule's own action is the one the router resolves on match
+		// (route/route.go:113), so normalize it before walking the children: a
+		// panel spelling like "proxy"/"block" on the logical rule itself would
+		// otherwise reach the outbound manager verbatim and fail as
+		// "outbound not found". Doing it first also keeps the child loop below
+		// untouched. Only rules that already carry an action are touched — an
+		// action-less logical rule stays action-less (match-only) instead of
+		// being turned into "route → select".
+		if hasConfiguredRuleAction(rule.LogicalOptions.RuleAction) {
+			rule.LogicalOptions.RuleAction = normalizeRuleAction(rule.LogicalOptions.RuleAction)
+		}
 		for i := range rule.LogicalOptions.Rules {
 			rule.LogicalOptions.Rules[i] = NormalizeRouteRule(rule.LogicalOptions.Rules[i])
 		}
@@ -70,32 +82,43 @@ func NormalizeRouteRule(rule option.Rule) option.Rule {
 	return rule
 }
 
+// hasConfiguredRuleAction mirrors ruleHasConfiguredAction in the engine.
+func hasConfiguredRuleAction(action option.RuleAction) bool {
+	return !reflect.DeepEqual(action, option.RuleAction{})
+}
+
 func normalizeDefaultRule(r option.DefaultRule) option.DefaultRule {
-	action := r.Action
-	if action == "" {
-		action = C.RuleActionTypeRoute
+	r.RuleAction = normalizeRuleAction(r.RuleAction)
+	return r
+}
+
+// normalizeRuleAction remaps route/reject/bypass actions onto concrete client tags.
+func normalizeRuleAction(action option.RuleAction) option.RuleAction {
+	actionType := action.Action
+	if actionType == "" {
+		actionType = C.RuleActionTypeRoute
 	}
-	switch action {
+	switch actionType {
 	case C.RuleActionTypeRoute, "":
-		out, reject := RemapLogicalOutbound(r.RouteOptions.Outbound)
+		out, reject := RemapLogicalOutbound(action.RouteOptions.Outbound)
 		if reject {
-			r.Action = C.RuleActionTypeReject
-			r.RouteOptions = option.RouteActionOptions{}
-			r.RejectOptions = option.RejectActionOptions{
+			action.Action = C.RuleActionTypeReject
+			action.RouteOptions = option.RouteActionOptions{}
+			action.RejectOptions = option.RejectActionOptions{
 				Method: C.RuleActionRejectMethodDefault,
 			}
-			return r
+			return action
 		}
-		r.Action = C.RuleActionTypeRoute
-		r.RouteOptions.Outbound = out
+		action.Action = C.RuleActionTypeRoute
+		action.RouteOptions.Outbound = out
 	case C.RuleActionTypeReject:
 		// keep
 	case C.RuleActionTypeBypass:
-		r.Action = C.RuleActionTypeRoute
-		r.RouteOptions.Outbound = OutboundDirectTag
-		r.BypassOptions = option.RouteActionOptions{}
+		action.Action = C.RuleActionTypeRoute
+		action.RouteOptions.Outbound = OutboundDirectTag
+		action.BypassOptions = option.RouteActionOptions{}
 	}
-	return r
+	return action
 }
 
 // MergeSubscriptionRoute appends subscription rule_sets (dedup by tag) and

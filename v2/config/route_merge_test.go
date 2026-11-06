@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -734,5 +735,127 @@ func TestBuildConfigProcessOwnerSingBoxJSON(t *testing.T) {
 	}
 	if !foundProxy || !foundPath || !foundRx || !foundReject {
 		t.Fatalf("proxy=%v path=%v rx=%v reject=%v json=%s", foundProxy, foundPath, foundRx, foundReject, routeJSON)
+	}
+}
+
+// A panel logical rule spells its own action with synthetic tags ("proxy"/"block").
+// NormalizeRouteRule used to only recurse into the children, so the rule kept the
+// raw tag and the router failed with "outbound not found" (route/route.go:113).
+func TestNormalizeRouteRuleLogicalOwnAction(t *testing.T) {
+	leaf := func(domain string, action option.RuleAction) option.Rule {
+		return option.Rule{
+			Type: C.RuleTypeDefault,
+			DefaultOptions: option.DefaultRule{
+				RawDefaultRule: option.RawDefaultRule{
+					Domain: badoption.Listable[string]{domain},
+				},
+				RuleAction: action,
+			},
+		}
+	}
+	routeTo := func(tag string) option.RuleAction {
+		return option.RuleAction{
+			Action:       C.RuleActionTypeRoute,
+			RouteOptions: option.RouteActionOptions{Outbound: tag},
+		}
+	}
+	logical := func(own option.RuleAction, children ...option.Rule) option.Rule {
+		return option.Rule{
+			Type: C.RuleTypeLogical,
+			LogicalOptions: option.LogicalRule{
+				RawLogicalRule: option.RawLogicalRule{
+					Mode:  C.LogicalTypeAnd,
+					Rules: children,
+				},
+				RuleAction: own,
+			},
+		}
+	}
+	// Same two children in every case: panel "proxy" and "direct" leaves, which
+	// the recursion must keep normalizing exactly as before.
+	children := func() []option.Rule {
+		return []option.Rule{
+			leaf("a.example", routeTo("proxy")),
+			leaf("b.example", routeTo("direct")),
+		}
+	}
+
+	tests := []struct {
+		name string
+		rule option.Rule
+		want option.RuleAction
+	}{
+		{
+			name: "own outbound proxy becomes client select tag",
+			rule: logical(routeTo("proxy"), children()...),
+			want: option.RuleAction{
+				Action:       C.RuleActionTypeRoute,
+				RouteOptions: option.RouteActionOptions{Outbound: config.OutboundSelectTag},
+			},
+		},
+		{
+			name: "own outbound block becomes reject",
+			rule: logical(routeTo("block"), children()...),
+			want: option.RuleAction{
+				Action:        C.RuleActionTypeReject,
+				RejectOptions: option.RejectActionOptions{Method: C.RuleActionRejectMethodDefault},
+			},
+		},
+		{
+			// The "action" spelling of the same normalization (bypass → route/direct).
+			name: "own bypass action becomes route to direct",
+			rule: logical(option.RuleAction{Action: C.RuleActionTypeBypass}, children()...),
+			want: option.RuleAction{
+				Action:       C.RuleActionTypeRoute,
+				RouteOptions: option.RouteActionOptions{Outbound: config.OutboundDirectTag},
+			},
+		},
+		{
+			// No own action: the rule must stay match-only, not gain "route → select".
+			name: "action-less logical rule keeps no action, nested leaf still normalizes",
+			rule: logical(option.RuleAction{}, children()...),
+			want: option.RuleAction{},
+		},
+	}
+
+	// Nested leaves keep normalizing as before, in order.
+	wantChild := []struct {
+		domain   string
+		action   string
+		outbound string
+	}{
+		{"a.example", C.RuleActionTypeRoute, config.OutboundSelectTag},
+		{"b.example", C.RuleActionTypeRoute, config.OutboundDirectTag},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := config.NormalizeRouteRule(tt.rule)
+			if got.Type != C.RuleTypeLogical {
+				t.Fatalf("type=%q want logical", got.Type)
+			}
+			if !reflect.DeepEqual(got.LogicalOptions.RuleAction, tt.want) {
+				t.Fatalf("own action=%+v want %+v", got.LogicalOptions.RuleAction, tt.want)
+			}
+			if got.LogicalOptions.Mode != C.LogicalTypeAnd {
+				t.Fatalf("mode=%q", got.LogicalOptions.Mode)
+			}
+			if len(got.LogicalOptions.Rules) != len(wantChild) {
+				t.Fatalf("children=%d want %d", len(got.LogicalOptions.Rules), len(wantChild))
+			}
+			for i, want := range wantChild {
+				child := got.LogicalOptions.Rules[i]
+				if child.Type != C.RuleTypeDefault {
+					t.Fatalf("child[%d] type=%q", i, child.Type)
+				}
+				if len(child.DefaultOptions.Domain) != 1 || child.DefaultOptions.Domain[0] != want.domain {
+					t.Fatalf("child[%d] domain=%v want %q", i, child.DefaultOptions.Domain, want.domain)
+				}
+				if child.DefaultOptions.Action != want.action || child.DefaultOptions.RouteOptions.Outbound != want.outbound {
+					t.Fatalf("child[%d] action=%q outbound=%q want %q/%q",
+						i, child.DefaultOptions.Action, child.DefaultOptions.RouteOptions.Outbound, want.action, want.outbound)
+				}
+			}
+		})
 	}
 }
