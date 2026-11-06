@@ -462,7 +462,7 @@ func TestSoftParseKeepsEndpointTagSharedWithInbound(t *testing.T) {
 	    "type":"wireguard","tag":"wg",
 	    "private_key":"cIPq1kWIIPewXHtEWmuyQKFTFmQwv8D5iH6g+K7b1Ec=",
 	    "address":["10.8.10.2"],
-	    "peers":[{"address":"31.58.171.145","port":47684,"public_key":"6KTid8OUZl2hoVmFKp48bAwnr5UImjLMRf6EajCENUI="}]
+	    "peers":[{"address":"31.58.171.145","port":47684,"public_key":"6KTid8OUZl2hoVmFKp48bAwnr5UImjLMRf6EajCENUI=","allowed_ips":["0.0.0.0/0"]}]
 	  }],
 	  "outbounds": [
 	    {"type":"vless","tag":"plain","server":"1.2.3.4","server_port":443,"uuid":"387c6b84-2e30-4b67-83c9-aa5692550e65"}
