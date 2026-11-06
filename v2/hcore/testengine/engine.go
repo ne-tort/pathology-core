@@ -682,44 +682,6 @@ func narrowSelectOutbounds(opts *option.Options, leaves []string) {
 	}
 }
 
-// pruneToAllowlist drops leaf outbounds/endpoints not in the Ensure allowlist so
-// side-box start does not spin up N Reality/XHTTP clients before the first probe.
-// Keeps select/group/direct and other predefined service tags.
-func pruneToAllowlist(opts *option.Options, leaves []string) {
-	if opts == nil {
-		return
-	}
-	keep := make(map[string]struct{}, len(leaves)+len(config.PredefinedOutboundTags)+1)
-	for _, t := range leaves {
-		keep[t] = struct{}{}
-	}
-	for _, t := range config.PredefinedOutboundTags {
-		keep[t] = struct{}{}
-	}
-	keep[config.OutboundRoundRobinTag] = struct{}{}
-
-	keptOb := opts.Outbounds[:0]
-	for _, ob := range opts.Outbounds {
-		if _, ok := keep[ob.Tag]; ok {
-			keptOb = append(keptOb, ob)
-			continue
-		}
-		switch ob.Type {
-		case C.TypeSelector, C.TypeURLTest, C.TypeBalancer, C.TypeBlock, C.TypeDNS, C.TypeDirect:
-			keptOb = append(keptOb, ob)
-		}
-	}
-	opts.Outbounds = keptOb
-
-	keptEp := opts.Endpoints[:0]
-	for _, ep := range opts.Endpoints {
-		if _, ok := keep[ep.Tag]; ok {
-			keptEp = append(keptEp, ep)
-		}
-	}
-	opts.Endpoints = keptEp
-}
-
 func readMixedListenPort(svc *daemon.StartedService) (uint16, error) {
 	if svc == nil {
 		return 0, fmt.Errorf("nil service")
