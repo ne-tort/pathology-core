@@ -71,7 +71,7 @@ func filterValidLeavesJSON(ctx context.Context, content []byte, filterInbounds b
 
 	if filterInbounds {
 		if raw, ok := root["inbounds"].([]interface{}); ok && len(raw) > 0 {
-			filtered := filterInboundLeaves(ctx, raw, index)
+			filtered := filterInboundLeaves(ctx, raw)
 			if len(filtered) != len(raw) {
 				changed = true
 			}
@@ -120,8 +120,14 @@ func FilterValidLeavesJSONForTest(ctx context.Context, content []byte) ([]byte, 
 // tagIndex records which tags the document declares more than once
 // (shared==true: the engine's "duplicate outbound/endpoint tag" is fatal) and
 // which are pathology legend parents that will acquire a "{tag}-auto" sibling
-// (pathParent==true). seen records every declared tag so a synthesized
-// "{tag}-auto" collision is caught even when the tag occurs only once.
+// (pathParent==true). seen is the running set duplicate detection is built
+// from.
+//
+// shared covers the outbound+endpoint namespace only. The engine checks
+// inbounds on their own (option/options.go:151 checkInbounds) and outbounds
+// together with endpoints (:166 checkOutbounds) — so a tag used by both an
+// inbound and an outbound is legal, and counting inbounds here made the filters
+// drop it as a "duplicate tag".
 type tagIndex struct {
 	shared     map[string]bool
 	pathParent map[string]bool
@@ -130,28 +136,38 @@ type tagIndex struct {
 
 func newTagIndex(root map[string]interface{}) *tagIndex {
 	idx := &tagIndex{shared: map[string]bool{}, pathParent: map[string]bool{}, seen: map[string]bool{}}
-	visit := func(key string) {
+	// duplicateNamespace reports whether the list's tags live in the outbound
+	// tag namespace (outbounds and endpoints do; inbounds have their own).
+	countTags := func(key string, duplicateNamespace bool) {
 		list, _ := root[key].([]interface{})
 		for _, item := range list {
 			m, ok := item.(map[string]interface{})
 			if !ok {
 				continue
 			}
-			tag := leafTag(m)
-			if tag != "" {
-				if idx.seen[tag] {
-					idx.shared[tag] = true
-				}
-				idx.seen[tag] = true
-			}
+			// Legend parents are collected from every list: the synthesized
+			// "{tag}-auto" group collides with a leaf of that name regardless
+			// of which list declared it.
 			if leafType(m) == C.TypePathology && pathologyLegendParent(m) {
-				idx.pathParent[tag] = true
+				idx.pathParent[leafTag(m)] = true
 			}
+			if !duplicateNamespace {
+				continue
+			}
+			tag := leafTag(m)
+			if tag == "" {
+				continue
+			}
+			if idx.seen[tag] {
+				idx.shared[tag] = true
+			}
+			idx.seen[tag] = true
 		}
 	}
-	for _, key := range []string{"outbounds", "endpoints", "inbounds"} {
-		visit(key)
+	for _, key := range []string{"outbounds", "endpoints"} {
+		countTags(key, true)
 	}
+	countTags("inbounds", false)
 	return idx
 }
 
@@ -360,7 +376,14 @@ func filterEndpointLeaves(ctx context.Context, items []interface{}, index *tagIn
 	return out
 }
 
-func filterInboundLeaves(ctx context.Context, items []interface{}, index *tagIndex) []interface{} {
+// filterInboundLeaves drops inbounds the 1.5 engine cannot build. The
+// duplicate check is inbound-local: the engine validates inbounds in a separate
+// tag namespace (option/options.go:151 checkInbounds → "duplicate inbound tag"),
+// so inbounds:[{tag:"proxy"}] next to outbounds:[{tag:"proxy"}] is a legal
+// document and must survive. It used to consult index.shared, which is built
+// across outbounds+endpoints+inbounds, and so dropped the inbound as a
+// duplicate — the profile then imported without its listener.
+func filterInboundLeaves(ctx context.Context, items []interface{}) []interface{} {
 	out := make([]interface{}, 0, len(items))
 	warns := parseWarningsFrom(ctx)
 	seenTags := make(map[string]bool)
@@ -374,7 +397,7 @@ func filterInboundLeaves(ctx context.Context, items []interface{}, index *tagInd
 			continue
 		}
 		tag := leafTag(m)
-		if (seenTags[tag] || (tag != "" && index.shared[tag])) && tag != "" {
+		if tag != "" && seenTags[tag] {
 			fmt.Printf("[SingboxParser] skip duplicate inbound tag %q type=%q\n", tag, typ)
 			warns.addDrop("inbound", typ, tag, "duplicate tag")
 			continue
@@ -386,6 +409,11 @@ func filterInboundLeaves(ctx context.Context, items []interface{}, index *tagInd
 		}
 		if ok, reason := checkInboundLeaf(ctx, m); ok {
 			out = append(out, item)
+			// Recorded on the success path only: a dropped inbound must not
+			// make a later valid one with the same tag look duplicated.
+			if tag != "" {
+				seenTags[tag] = true
+			}
 		} else {
 			fmt.Printf("[SingboxParser] skip invalid inbound type=%q tag=%q: %v\n", typ, leafTag(m), reason)
 			warns.addDrop("inbound", typ, leafTag(m), reason)

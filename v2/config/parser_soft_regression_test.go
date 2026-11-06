@@ -382,3 +382,105 @@ func TestSoftParseKeepsAuthorisedPathologyLegendParent(t *testing.T) {
 		t.Fatalf("valid legend parent must not warn: %s", msg)
 	}
 }
+
+// Defect 3: inbounds live in their own tag namespace in the engine
+// (option/options.go:151 checkInbounds vs :166 checkOutbounds), so an inbound
+// may reuse an outbound's tag. filterInboundLeaves used to run the inbound tag
+// through the cross-namespace duplicate index and dropped the listener.
+func TestSoftParseKeepsInboundTagSharedWithOutbound(t *testing.T) {
+	ctx, collector := config.WithParseWarnings(config_test_libboxCtx())
+	raw := `{
+	  "inbounds": [
+	    {"type":"mixed","tag":"proxy","listen":"127.0.0.1","listen_port":7890}
+	  ],
+	  "outbounds": [
+	    {"type":"vless","tag":"proxy","server":"1.2.3.4","server_port":443,"uuid":"387c6b84-2e30-4b67-83c9-aa5692550e65"}
+	  ]
+	}`
+	parsed, err := config.ParseConfigBytes(ctx, &config.ReadOptions{Content: raw}, true, config.DefaultClientOptions(), true)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	var doc map[string]interface{}
+	if jErr := json.Unmarshal(parsed, &doc); jErr != nil {
+		t.Fatalf("not JSON: %v", jErr)
+	}
+	inbounds, _ := doc["inbounds"].([]interface{})
+	if len(inbounds) != 1 {
+		t.Fatalf("inbound sharing an outbound tag must survive, got %v: %s", doc["inbounds"], parsed)
+	}
+	if msg := collector.MessageJSON(); strings.Contains(msg, "duplicate tag") {
+		t.Fatalf("cross-namespace tag must not be reported as a duplicate: %s", msg)
+	}
+	if !strings.Contains(string(parsed), `"tag":"proxy"`) && !strings.Contains(string(parsed), `"tag": "proxy"`) {
+		t.Fatalf("the outbound must survive too: %s", parsed)
+	}
+}
+
+// The inbound-local check still has to catch the collision the engine does
+// enforce ("duplicate inbound tag").
+func TestSoftParseDropsDuplicateInboundTag(t *testing.T) {
+	ctx, collector := config.WithParseWarnings(config_test_libboxCtx())
+	raw := `{
+	  "inbounds": [
+	    {"type":"mixed","tag":"in","listen":"127.0.0.1","listen_port":7890},
+	    {"type":"mixed","tag":"in","listen":"127.0.0.1","listen_port":7891}
+	  ],
+	  "outbounds": [
+	    {"type":"vless","tag":"plain","server":"1.2.3.4","server_port":443,"uuid":"387c6b84-2e30-4b67-83c9-aa5692550e65"}
+	  ]
+	}`
+	parsed, err := config.ParseConfigBytes(ctx, &config.ReadOptions{Content: raw}, true, config.DefaultClientOptions(), true)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	var doc map[string]interface{}
+	if jErr := json.Unmarshal(parsed, &doc); jErr != nil {
+		t.Fatalf("not JSON: %v", jErr)
+	}
+	inbounds, _ := doc["inbounds"].([]interface{})
+	if len(inbounds) != 1 {
+		t.Fatalf("want exactly one surviving inbound, got %d: %s", len(inbounds), parsed)
+	}
+	if !strings.Contains(collector.MessageJSON(), "duplicate tag") {
+		t.Fatalf("duplicate inbound must be reported: %s", collector.MessageJSON())
+	}
+	if !strings.Contains(string(parsed), "7890") {
+		t.Fatalf("first occurrence must win: %s", parsed)
+	}
+}
+
+// Endpoints share the outbound namespace, not the inbound one: an endpoint tag
+// equal to an inbound tag is legal and must not be dropped.
+func TestSoftParseKeepsEndpointTagSharedWithInbound(t *testing.T) {
+	ctx, collector := config.WithParseWarnings(config_test_libboxCtx())
+	raw := `{
+	  "inbounds": [
+	    {"type":"mixed","tag":"wg","listen":"127.0.0.1","listen_port":7890}
+	  ],
+	  "endpoints": [{
+	    "type":"wireguard","tag":"wg",
+	    "private_key":"cIPq1kWIIPewXHtEWmuyQKFTFmQwv8D5iH6g+K7b1Ec=",
+	    "address":["10.8.10.2"],
+	    "peers":[{"address":"31.58.171.145","port":47684,"public_key":"6KTid8OUZl2hoVmFKp48bAwnr5UImjLMRf6EajCENUI="}]
+	  }],
+	  "outbounds": [
+	    {"type":"vless","tag":"plain","server":"1.2.3.4","server_port":443,"uuid":"387c6b84-2e30-4b67-83c9-aa5692550e65"}
+	  ]
+	}`
+	parsed, err := config.ParseConfigBytes(ctx, &config.ReadOptions{Content: raw}, true, config.DefaultClientOptions(), true)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	var doc map[string]interface{}
+	if jErr := json.Unmarshal(parsed, &doc); jErr != nil {
+		t.Fatalf("not JSON: %v", jErr)
+	}
+	endpoints, _ := doc["endpoints"].([]interface{})
+	if len(endpoints) != 1 {
+		t.Fatalf("endpoint sharing an inbound tag must survive, got %v: %s", doc["endpoints"], parsed)
+	}
+	if msg := collector.MessageJSON(); strings.Contains(msg, "duplicate tag") {
+		t.Fatalf("inbound/endpoint tag reuse is legal: %s", msg)
+	}
+}
