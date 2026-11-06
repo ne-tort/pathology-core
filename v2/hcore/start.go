@@ -78,6 +78,23 @@ func loadLastStartRequestIfNeeded(in *StartRequest) (*StartRequest, error) {
 	}, nil
 }
 
+// buildStartOptions builds the config for a Start RPC on a context that carries
+// a parse-warnings collector, and returns the collector's payload for
+// CoreInfoResponse.parse_warnings ("" when nothing was dropped or migrated).
+//
+// Start re-parses/re-builds the profile, so drops and 1.4→1.5 migrations raised
+// here are the same class the import path reports through ParseResponse.Message.
+// Keep both channels on config.ParseWarningsCollector so the client renders them
+// with one renderer.
+func buildStartOptions(ctx context.Context, in *StartRequest) (*option.Options, string, error) {
+	ctx, parseWarnings := config.WithParseWarnings(ctx)
+	options, err := BuildConfig(ctx, in)
+	if err != nil {
+		return nil, "", err
+	}
+	return options, parseWarnings.MessageJSON(), nil
+}
+
 func StartService(ctx context.Context, in *StartRequest) (coreResponse *CoreInfoResponse, err error) {
 	defer config.DeferPanicToError("startmobile", func(recovered_err error) {
 		coreResponse, err = errorWrapper(MessageType_UNEXPECTED_ERROR, recovered_err)
@@ -109,8 +126,17 @@ func StartService(ctx context.Context, in *StartRequest) (coreResponse *CoreInfo
 		)
 	}
 
+	// The Start path RE-PARSES and RE-BUILDS the profile, so it raises the same
+	// non-fatal warnings as import (soft-parse drops, 1.4→1.5 migrations). They
+	// used to go to a nil collector: the app showed "connected" over a config
+	// materially different from what the user saw at import time. They now ride
+	// CoreInfoResponse.parse_warnings (see buildStartOptions).
+	//
+	// libbox.BaseContext REPLACES the context (it derives from the platform
+	// context, not from ctx), so the collector is attached after it, inside
+	// buildStartOptions — never on the caller's ctx.
 	ctx = libbox.BaseContext(static.platform())
-	options, err := BuildConfig(ctx, in)
+	options, parseWarnings, err := buildStartOptions(ctx, in)
 	if err != nil {
 		return errorWrapper(MessageType_ERROR_BUILDING_CONFIG, err)
 	}
@@ -197,5 +223,5 @@ func StartService(ctx context.Context, in *StartRequest) (coreResponse *CoreInfo
 		}
 	}
 
-	return SetCoreStatus(CoreStates_STARTED, MessageType_EMPTY, ""), nil
+	return SetCoreStatusWithParseWarnings(CoreStates_STARTED, MessageType_EMPTY, "", parseWarnings), nil
 }

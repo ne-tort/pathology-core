@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"sort"
 	"strings"
-	sync "sync"
 	"time"
 
 	mDNS "github.com/miekg/dns"
@@ -96,7 +95,10 @@ func BuildConfig(ctx context.Context, hopts *ClientOptions, inputOpt *ReadOption
 	if hopts.EnableFullConfig {
 		options.Inbounds = input.Inbounds
 		options.DNS = input.DNS
-		options.Route = input.Route
+		// input.Route is not assigned here: setRoutingOptions owns route
+		// assembly and carries the profile's route-level fields forward (see
+		// carryFullConfigRouteFields). A plain `options.Route = input.Route`
+		// used to be discarded wholesale one call later.
 	}
 
 	setExperimental(&options, hopts)
@@ -1223,8 +1225,22 @@ func setRoutingOptions(options *option.Options, input *option.Options, hopt *Cli
 
 	// Subscription route is raw merge at connect time only (never auto-imported into local profile).
 	// Local rules are always evaluated first so the client wins conflicts.
-	if input != nil && input.Route != nil && !hopt.IgnoreSubscriptionRoute {
+	// A full config owns its own route block, so the overlay is skipped there —
+	// mergeFullConfigRoute below is the (unconditional) equivalent for it and
+	// running both would append the profile's rules twice.
+	if input != nil && input.Route != nil && !hopt.IgnoreSubscriptionRoute && !hopt.EnableFullConfig {
 		MergeSubscriptionRoute(input.Route, &rulesets, &routeRules)
+	}
+	// EnableFullConfig: the profile body is the user's own sing-box document, so
+	// its route rules/rule_sets are its policy — kept even when the subscription
+	// overlay is switched off. Appended behind the client's, so the client's
+	// sniff/hijack/block-quic and profile rules still match first. Their
+	// outbound targets can only be validated once the outbounds exist, so the
+	// first user rule is remembered and pruned at the end of this function.
+	fullConfigRuleStart := -1
+	if hopt.EnableFullConfig && input != nil && input.Route != nil {
+		fullConfigRuleStart = len(routeRules)
+		mergeFullConfigRoute(input.Route, &rulesets, &routeRules)
 	}
 
 	sanitized, err := sanitizeRuleSetsLocalOnly(rulesets)
@@ -1347,94 +1363,28 @@ func setRoutingOptions(options *option.Options, input *option.Options, hopt *Cli
 		}
 	}
 
+	// EnableFullConfig: the profile's route block is the user's own config, so
+	// its route-level fields are carried forward here — after the client's
+	// final / strategy / resolver assembly, which stays authoritative wherever
+	// honouring the profile would break a client guarantee. Runs last so the
+	// live-tag check sees the outbounds and the DNS block exactly as they will
+	// be handed to the engine.
+	if hopt.EnableFullConfig && input != nil && input.Route != nil {
+		live := liveRouteTargets(options)
+		if fullConfigRuleStart >= 0 && fullConfigRuleStart <= len(options.Route.Rules) {
+			options.Route.Rules = pruneDeadFullConfigRules(options.Route.Rules, fullConfigRuleStart, live)
+		}
+		// The generated final encodes the app's own policy (routing-global-proxy
+		// or an enabled routing profile) and is what the node picker drives, so
+		// it is authoritative exactly when that policy is configured.
+		clientOwnsFinal := hopt.RoutingGlobalProxy != nil || anyEnabled
+		// TestMode keeps auto_detect_interface on mobile: the side box needs it to
+		// run ProtectFunc under an active VPN (same carve-out as the client's own
+		// autoDetect above).
+		blockAutoDetect := (C.IsAndroid || C.IsIos) && !hopt.TestMode
+		options.Route = carryFullConfigRouteFields(input.Route, options.Route, live, options.DNS, input.HTTPClients, clientOwnsFinal, blockAutoDetect)
+	}
+
 	return nil
 }
 
-var (
-	ipMaps      = map[string][]string{}
-	ipMapsMutex sync.Mutex
-)
-
-func getIPs(domains ...string) []string {
-	var wg sync.WaitGroup
-	resChan := make(chan string, len(domains)*10) // Collect both IPv4 and IPv6
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-
-	for _, d := range domains {
-		wg.Add(1)
-		go func(domain string) {
-			defer wg.Done()
-			ips, err := net.DefaultResolver.LookupIP(ctx, "ip", domain)
-			if err != nil {
-				return
-			}
-			for _, ip := range ips {
-				ipStr := ip.String()
-				if !isBlockedIP(ipStr) {
-					resChan <- ipStr
-				}
-			}
-		}(d)
-	}
-
-	go func() {
-		wg.Wait()
-		close(resChan)
-	}()
-
-	var res []string
-	for ip := range resChan {
-		res = append(res, ip)
-	}
-	if len(res) == 0 && ipMaps[domains[0]] != nil {
-		return ipMaps[domains[0]]
-	}
-	ipMapsMutex.Lock()
-	ipMaps[domains[0]] = res
-	ipMapsMutex.Unlock()
-
-	return res
-}
-
-func isBlockedDomain(domain string) bool {
-	if strings.HasPrefix("full:", domain) {
-		return false
-	}
-	if strings.Contains(domain, "instagram") || strings.Contains(domain, "facebook") || strings.Contains(domain, "telegram") || strings.Contains(domain, "t.me") {
-		return true
-	}
-	ips := getIPs(domain)
-	if len(ips) == 0 {
-		// fmt.Println(err)
-		return true
-	}
-
-	// // Print the IP addresses associated with the domain
-	// fmt.Printf("IP addresses for %s:\n", domain)
-	// for _, ip := range ips {
-	// 	if isBlockedIP(ip) {
-	// 		return true
-	// 	}
-	// }
-	return false
-}
-
-func isBlockedIP(ip string) bool {
-	if strings.HasPrefix(ip, "10.") || strings.HasPrefix(ip, "2001:4188:2:600:10") {
-		return true
-	}
-	return false
-}
-
-func removeDuplicateStr(strSlice []string) []string {
-	allKeys := make(map[string]bool)
-	list := []string{}
-	for _, item := range strSlice {
-		if _, value := allKeys[item]; !value {
-			allKeys[item] = true
-			list = append(list, item)
-		}
-	}
-	return list
-}

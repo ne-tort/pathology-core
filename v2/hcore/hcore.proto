@@ -36,6 +36,16 @@ message CoreInfoResponse {
   CoreStates core_state = 1;
   MessageType message_type = 2;
   string message = 3;
+  // Non-fatal parse/build warnings raised while the core (re)parsed the
+  // profile for this call — the Start path rebuilds the config, so a profile
+  // can drop or migrate nodes between import and connect.
+  //
+  // Carries EXACTLY the payload ParseResponse.message carries on OK responses
+  // ({"parseWarnings": {...}}, config.ParseWarningsCollector.MessageJSON), so
+  // the client feeds both channels through one renderer. Empty when nothing
+  // was dropped or migrated. Cores that predate the field omit it, which a
+  // proto3 client reads as "" — i.e. "no warnings".
+  string parse_warnings = 4;
 }
 
 message StartRequest {

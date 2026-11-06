@@ -323,10 +323,20 @@ func (LogType) EnumDescriptor() ([]byte, []int) {
 }
 
 type CoreInfoResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	CoreState     CoreStates             `protobuf:"varint,1,opt,name=core_state,json=coreState,proto3,enum=hcore.CoreStates" json:"core_state,omitempty"`
-	MessageType   MessageType            `protobuf:"varint,2,opt,name=message_type,json=messageType,proto3,enum=hcore.MessageType" json:"message_type,omitempty"`
-	Message       string                 `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	CoreState   CoreStates             `protobuf:"varint,1,opt,name=core_state,json=coreState,proto3,enum=hcore.CoreStates" json:"core_state,omitempty"`
+	MessageType MessageType            `protobuf:"varint,2,opt,name=message_type,json=messageType,proto3,enum=hcore.MessageType" json:"message_type,omitempty"`
+	Message     string                 `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
+	// Non-fatal parse/build warnings raised while the core (re)parsed the
+	// profile for this call — the Start path rebuilds the config, so a profile
+	// can drop or migrate nodes between import and connect.
+	//
+	// Carries EXACTLY the payload ParseResponse.message carries on OK responses
+	// ({"parseWarnings": {...}}, config.ParseWarningsCollector.MessageJSON), so
+	// the client feeds both channels through one renderer. Empty when nothing
+	// was dropped or migrated. Cores that predate the field omit it, which a
+	// proto3 client reads as "" — i.e. "no warnings".
+	ParseWarnings string `protobuf:"bytes,4,opt,name=parse_warnings,json=parseWarnings,proto3" json:"parse_warnings,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -378,6 +388,13 @@ func (x *CoreInfoResponse) GetMessageType() MessageType {
 func (x *CoreInfoResponse) GetMessage() string {
 	if x != nil {
 		return x.Message
+	}
+	return ""
+}
+
+func (x *CoreInfoResponse) GetParseWarnings() string {
+	if x != nil {
+		return x.ParseWarnings
 	}
 	return ""
 }
@@ -2849,12 +2866,13 @@ var File_v2_hcore_hcore_proto protoreflect.FileDescriptor
 
 const file_v2_hcore_hcore_proto_rawDesc = "" +
 	"\n" +
-	"\x14v2/hcore/hcore.proto\x12\x05hcore\x1a\x17v2/hcommon/common.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x95\x01\n" +
+	"\x14v2/hcore/hcore.proto\x12\x05hcore\x1a\x17v2/hcommon/common.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xbc\x01\n" +
 	"\x10CoreInfoResponse\x120\n" +
 	"\n" +
 	"core_state\x18\x01 \x01(\x0e2\x11.hcore.CoreStatesR\tcoreState\x125\n" +
 	"\fmessage_type\x18\x02 \x01(\x0e2\x12.hcore.MessageTypeR\vmessageType\x12\x18\n" +
-	"\amessage\x18\x03 \x01(\tR\amessage\"\xb1\x02\n" +
+	"\amessage\x18\x03 \x01(\tR\amessage\x12%\n" +
+	"\x0eparse_warnings\x18\x04 \x01(\tR\rparseWarnings\"\xb1\x02\n" +
 	"\fStartRequest\x12\x1f\n" +
 	"\vconfig_path\x18\x01 \x01(\tR\n" +
 	"configPath\x12%\n" +

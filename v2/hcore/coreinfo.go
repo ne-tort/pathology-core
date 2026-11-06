@@ -9,6 +9,25 @@ import (
 )
 
 func SetCoreStatus(state CoreStates, msgType MessageType, message string) *CoreInfoResponse {
+	return setCoreStatus(state, msgType, message, "")
+}
+
+// SetCoreStatusWithParseWarnings is [SetCoreStatus] plus the non-fatal
+// parse/build warnings of the call that produced this state (Start path: the
+// core re-parses the profile, so leaves can be dropped or 1.4→1.5 keys
+// migrated between import and connect). The payload is
+// config.ParseWarningsCollector.MessageJSON(), i.e. the same
+// {"parseWarnings": {...}} blob ParseResponse.Message carries, so the client
+// feeds both channels through one renderer.
+//
+// A single constructor for both keeps the message handed to subscribers
+// identical to the one returned to the caller — mutating the returned response
+// after Publish would be a data race against the core-info listener.
+func SetCoreStatusWithParseWarnings(state CoreStates, msgType MessageType, message string, parseWarnings string) *CoreInfoResponse {
+	return setCoreStatus(state, msgType, message, parseWarnings)
+}
+
+func setCoreStatus(state CoreStates, msgType MessageType, message string, parseWarnings string) *CoreInfoResponse {
 	msg := fmt.Sprintf("%s: %s %s", state.String(), msgType.String(), message)
 	if msgType == MessageType_EMPTY {
 		msg = fmt.Sprintf("%s: %s", state.String(), message)
@@ -28,9 +47,10 @@ func SetCoreStatus(state CoreStates, msgType MessageType, message string) *CoreI
 	}
 	static.CoreState = state
 	info := CoreInfoResponse{
-		CoreState:   state,
-		MessageType: msgType,
-		Message:     message,
+		CoreState:     state,
+		MessageType:   msgType,
+		Message:       message,
+		ParseWarnings: parseWarnings,
 	}
 	static.coreInfoObserver.Publish(&info)
 

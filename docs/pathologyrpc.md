@@ -270,6 +270,7 @@
 | core_state | [CoreStates](#hcore-CoreStates) |  |  |
 | message_type | [MessageType](#hcore-MessageType) |  |  |
 | message | [string](#string) |  |  |
+| parse_warnings | [string](#string) |  | Non-fatal parse/build warnings raised while the core (re)parsed the profile for this call — the Start path rebuilds the config, so a profile can drop or migrate nodes between import and connect. Carries EXACTLY the payload ParseResponse.message carries on OK responses. Empty means "nothing to report". |
 
 
 
