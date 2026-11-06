@@ -530,6 +530,13 @@ func migrateRuleGeo(rule map[string]interface{}, root map[string]interface{}, la
 				continue
 			}
 			tag := ensureGeoRuleSet(root, kind, code)
+			if tag == "" {
+				// No bundled/local file for this code: a synthesized remote
+				// rule_set would fail closed at Start (builder.go sanitize),
+				// so the matcher is dropped here instead.
+				*warnings = append(*warnings, fmt.Sprintf("%s: %s %q dropped — no bundled rule_set for it (only geoip/geosite-cn, -ir, -ru and the category sets ship with the client)", label, kind, code))
+				continue
+			}
 			tags = append(tags, tag)
 			*warnings = append(*warnings, fmt.Sprintf("%s: %s %q → rule_set %q", label, kind, code, tag))
 		}
@@ -581,6 +588,15 @@ func ruleHasCondition(rule map[string]interface{}) bool {
 // route.rule_set declares it. The tag already being declared (by us on a
 // previous rule, or by the subscription itself) is a no-op: the engine rejects
 // a duplicate rule-set tag.
+//
+// Returns "" when the code cannot be resolved to a local file. That matters:
+// BuildConfig runs every subscription rule_set through
+// sanitizeRuleSetsLocalOnly (builder.go), which FAILS CLOSED on a remote entry
+// with no local file. Synthesizing a remote rule_set for a code the client does
+// not ship (only geoip/geosite-cn, -ir, -ru and the category sets are bundled)
+// would therefore turn an import-time migration into a start-time failure —
+// strictly worse than the rule it replaced. The caller drops the matcher and
+// warns instead, so neither the import nor the start can fail.
 func ensureGeoRuleSet(root map[string]interface{}, kind, code string) string {
 	tag := kind + "-" + code
 	route, ok := root["route"].(map[string]interface{})
@@ -607,11 +623,15 @@ func ensureGeoRuleSet(root map[string]interface{}, kind, code string) string {
 	if kind == geoKindGeoIP {
 		url = DefaultGeoIPRuleSetURL
 	}
+	url = strings.ReplaceAll(url, "{tag}", code)
+	if resolveLocalRuleSetFile(tag, url) == "" {
+		return ""
+	}
 	route["rule_set"] = append(sets, map[string]interface{}{
 		"type":   ruleSetRemote,
 		"tag":    tag,
 		"format": ruleSetBinFormat,
-		"url":    strings.ReplaceAll(url, "{tag}", code),
+		"url":    url,
 	})
 	return tag
 }

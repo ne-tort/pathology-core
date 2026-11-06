@@ -3,6 +3,8 @@ package config
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -16,6 +18,35 @@ func migrateDoc(t *testing.T, raw string) (map[string]interface{}, []string) {
 		t.Fatal(err)
 	}
 	return root, MigrateLegacyJSON(root)
+}
+
+// stageBundledRuleSets puts `<tag>.srs` files into a temp cwd's rules/ dir for
+// the lifetime of the test and restores the previous cwd afterwards.
+//
+// The geo migrator only rewrites a legacy geosite/geoip matcher when the code
+// resolves to a local file (resolveLocalRuleSetFile — the same function
+// BuildConfig's fail-closed sanitizer uses, so the two can never disagree)
+// instead of synthesizing a remote rule_set that would kill the start.
+func stageBundledRuleSets(t *testing.T, tags ...string) {
+	t.Helper()
+	dir := t.TempDir()
+	rules := filepath.Join(dir, "rules")
+	if err := os.MkdirAll(rules, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, tag := range tags {
+		if err := os.WriteFile(filepath.Join(rules, tag+".srs"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(wd) })
 }
 
 func firstOutbound(t *testing.T, root map[string]interface{}) map[string]interface{} {
@@ -525,6 +556,7 @@ func routeRules(t *testing.T, root map[string]interface{}) []interface{} {
 // Both are rewritten to rule_set references backed by synthesized remote sets,
 // and the existing entries of the rule's rule_set stay first.
 func TestMigrateGeoRuleMatchers(t *testing.T) {
+	stageBundledRuleSets(t, "geosite-cn", "geosite-ads", "geoip-cn")
 	root, warnings := migrateDoc(t, `{"route":{"rules":[
 		{"domain_suffix":[".example"],"outbound":"direct"},
 		{"geosite":["cn","ads"],"geoip":["cn"],"rule_set":["custom"],"outbound":"proxy"}
@@ -589,6 +621,7 @@ func TestMigrateGeoRuleMatchers(t *testing.T) {
 // Two rules asking for the same code share one rule-set: the engine rejects a
 // duplicate rule-set tag outright.
 func TestMigrateGeoRuleSetDedupAcrossRules(t *testing.T) {
+	stageBundledRuleSets(t, "geosite-cn")
 	root, _ := migrateDoc(t, `{"route":{"rules":[
 		{"geosite":["cn"],"outbound":"direct"},
 		{"geosite":["cn"],"outbound":"proxy"}
@@ -670,6 +703,7 @@ func TestMigrateSourceGeoIPOnlyRuleDropped(t *testing.T) {
 // A geosite nested in a logical rule fails box.New exactly like a top-level
 // one, so the recursion has to reach it.
 func TestMigrateGeoInLogicalRule(t *testing.T) {
+	stageBundledRuleSets(t, "geosite-cn")
 	root, warnings := migrateDoc(t, `{"route":{"rules":[
 		{"type":"logical","mode":"and","rules":[
 			{"geosite":["cn"]},
@@ -707,6 +741,7 @@ func TestMigrateGeoInLogicalRule(t *testing.T) {
 // dns.Router.Initialize in box.New), so geosite is rewritten there too. A DNS
 // rule-set entry matches the queried domain, which is what geosite did.
 func TestMigrateGeoDNSRule(t *testing.T) {
+	stageBundledRuleSets(t, "geosite-cn")
 	root, warnings := migrateDoc(t, `{"dns":{"rules":[
 		{"geosite":["cn"],"server":"local"}
 	]}}`)
@@ -737,6 +772,43 @@ func TestMigrateGeoDNSRule(t *testing.T) {
 		t.Fatalf("second run must be silent, got %v", again)
 	}
 }
+
+// A geo code with no bundled rule_set must NOT become a synthesized remote set:
+// BuildConfig runs every subscription rule_set through the fail-closed local
+// sanitizer, so a remote entry with no local file turns an import-time rewrite
+// into a start-time failure. The matcher is dropped (and reported) instead, and
+// the rest of the rule survives.
+func TestMigrateGeoCodeWithoutBundledRulesetIsDropped(t *testing.T) {
+	// Only -cn is staged; "-zz" has no file.
+	stageBundledRuleSets(t, "geosite-cn")
+	root, warnings := migrateDoc(t, `{"route":{"rules":[
+		{"geosite":["zz"],"domain_suffix":[".example"],"outbound":"proxy"}
+	]}}`)
+	rule := routeRules(t, root)[0].(map[string]interface{})
+	if _, ok := rule["geosite"]; ok {
+		t.Fatalf("geosite must be removed either way: %v", rule)
+	}
+	if _, ok := rule["rule_set"]; ok {
+		t.Fatalf("no rule_set must be synthesized for an unbundled code: %v", rule)
+	}
+	if len(routeRuleSets(t, root)) != 0 {
+		t.Fatalf("route.rule_set must stay empty: %v", routeRuleSets(t, root))
+	}
+	// The rule keeps its other matcher, so it is not dropped.
+	if got := jsonStrings(t, rule["domain_suffix"]); !equalStrings(got, []string{".example"}) {
+		t.Fatalf("other conditions must survive: %v", rule)
+	}
+	found := false
+	for _, w := range warnings {
+		if strings.Contains(w, `"zz"`) && strings.Contains(w, "dropped") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the dropped matcher must be reported: %v", warnings)
+	}
+}
+
 
 // ---------------------------------------------------------------------------
 // Defect 2: the brutal_mbps axis
