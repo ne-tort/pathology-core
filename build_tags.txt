@@ -7,7 +7,13 @@
 #   - with_carrier (+ provider tags) — carrier inbound+outbound (not client-only)
 #   - with_pathologywg — WG PathologyWG morpher (parity with Makefile.lx LX_TAGS / server tags)
 #   - with_failover, with_tlspoint, with_scatter — new 1.5 types (subscriptions carrying them must parse)
-#   - with_lx_utls — inert under 1.5 (lab short names removed upstream); kept for tag parity
+#   - with_lx_utls — NOT inert under 1.5: common/quic/lxquicfp is built only with
+#     this tag, and common/tls/policy.go:521 (EffectiveQUICFingerprint) errors out
+#     "fingerprint catalog requires rebuild with with_lx_utls" for every protocol
+#     with a non-empty DefaultQUICFingerprint (hysteria, hysteria2, tuic,
+#     trusttunnel). Without it, every hy2/tuic subscription leaf is soft-dropped
+#     as invalid (proved: v2/config tests fail on legacy-hy2/legacy-tuic). Do
+#     NOT remove; the 1.4-era "lab short names removed" note was wrong.
 # Intentionally omitted (not VPN tunnel protocols; same rationale as Makefile.lx LX_TAGS):
 #   - with_clash_api — retired: app no longer emits experimental.clash_api; stub build is enough
 #   - with_lx_command — desktop CLI only
