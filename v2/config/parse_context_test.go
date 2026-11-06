@@ -10,8 +10,11 @@ import (
 	"github.com/sagernet/sing-box/option"
 )
 
-// Soft leaf filter UnmarshalJSONContext needs outbound registries. Plain
-// context.Background (e.g. raw gRPC ctx) drops all leaves → empty TestEngine pool.
+// Soft leaf filter UnmarshalJSONContext needs outbound registries from libbox.
+// Plain context.Background (e.g. raw gRPC ctx) cannot decode any leaf; under
+// 1.5 that surfaces as an explicit "missing outbound options registry" error
+// instead of the old silent empty TestEngine pool. Every production entry
+// point wraps with libbox.BaseContext (config_server, hcore, cmd/*).
 func TestParseBuildConfigRequiresLibboxContext(t *testing.T) {
 	raw := `{
   "outbounds": [
@@ -27,12 +30,10 @@ func TestParseBuildConfigRequiresLibboxContext(t *testing.T) {
 	opt := config.DefaultClientOptions()
 	opt.TestMode = true
 
-	bad, err := config.ParseBuildConfig(context.Background(), opt, &config.ReadOptions{Content: raw})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n := countProbeLeaves(bad); n != 0 {
-		t.Fatalf("background ctx: want 0 probe leaves, got %d", n)
+	// Registry-less context: the soft filter must NOT silently return an empty
+	// pool (that is what used to make TestEngine report "no nodes").
+	if _, err := config.ParseBuildConfig(context.Background(), opt, &config.ReadOptions{Content: raw}); err == nil {
+		t.Fatal("background ctx: expected a registry error, got a config")
 	}
 
 	good, err := config.ParseBuildConfig(libbox.BaseContext(nil), opt, &config.ReadOptions{Content: raw})
