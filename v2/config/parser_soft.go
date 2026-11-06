@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	C "github.com/sagernet/sing-box/constant"
@@ -155,8 +156,9 @@ func newTagIndex(root map[string]interface{}) *tagIndex {
 }
 
 // isGroupType reports whether the type names a group rather than a dialable
-// leaf. 1.4 style configs also nest failover/scatter groups; those have no 1.5
-// type, so they must never be counted or validated as leaves.
+// leaf. Subscriptions carry selector/urltest/balancer plus the 1.5 wrappers
+// failover (L4 session restore) and scatter (L4 multipath); none of them is a
+// leaf, so they must never be counted or validated as one.
 func isGroupType(typ string) bool {
 	switch strings.ToLower(strings.TrimSpace(typ)) {
 	case "selector", "urltest", "balancer", "failover", "scatter":
@@ -393,6 +395,9 @@ func filterInboundLeaves(ctx context.Context, items []interface{}, index *tagInd
 }
 
 func checkOutboundLeaf(ctx context.Context, leaf map[string]interface{}) (bool, error) {
+	if ok, reason := checkPathologyLegends(leaf); !ok {
+		return false, reason
+	}
 	stub := stubDirectOutbound()
 	routeFinal := stubTag
 	// Avoid duplicate tag when the leaf itself is already tagged "direct".
@@ -407,9 +412,78 @@ func checkOutboundLeaf(ctx context.Context, leaf map[string]interface{}) (bool, 
 	return checkConfigMap(ctx, cfg)
 }
 
+// checkPathologyLegends validates a pathology legend parent at parse time the
+// way the engine will at start time. Validating the leaf in isolation (the
+// generic checkConfigMap below) cannot catch either defect, because both only
+// appear once the engine materialises the virtuals and the builder's rotation
+// group names them:
+//
+//   - legends/auth mismatch. option/pathology_expand.go expands a virtual only
+//     for a legend that has an auth entry ("if !hasAuth { continue }"), but its
+//     own validation only proves the reverse direction (every auth has a
+//     legend). So legends:{dns,stun} + auth:{dns} is accepted, yields a single
+//     {parent}-dns, and then balancer.Start() fails with
+//     "outbound 1 not found: {parent}-stun" — the whole profile cannot start,
+//     with no warning anywhere. Reject the mismatch here instead, naming the
+//     unmatched legend ids.
+//   - a legend named "auto". Legend ids match ^[a-zA-Z0-9_-]+$ and the virtual
+//     tag is parent+"-"+legend, so "auto" makes the virtual and the synthesized
+//     group the same tag. outbound.Manager replaces duplicate tags instead of
+//     erroring, so the group would name itself and self-dial.
+func checkPathologyLegends(leaf map[string]interface{}) (bool, error) {
+	if leafType(leaf) != C.TypePathology {
+		return true, nil
+	}
+	legends, _ := leaf["legends"].(map[string]interface{})
+	if len(legends) == 0 {
+		return true, nil
+	}
+	auth, _ := leaf["auth"].(map[string]interface{})
+	var noAuth, noLegend []string
+	for id := range legends {
+		if _, ok := auth[id]; !ok {
+			noAuth = append(noAuth, id)
+		}
+	}
+	for id := range auth {
+		if _, ok := legends[id]; !ok {
+			noLegend = append(noLegend, id)
+		}
+	}
+	sort.Strings(noAuth)
+	sort.Strings(noLegend)
+	if len(noAuth) > 0 {
+		return false, fmt.Errorf("legend %s has no auth entry: the engine expands no %q virtual for it, so the rotation group would name a missing outbound and the profile would fail to start (add auth for every legend, or remove the legend)",
+			quoteTagList(noAuth), leafTag(leaf)+"-"+noAuth[0])
+	}
+	if len(noLegend) > 0 {
+		return false, fmt.Errorf("auth %s has no legends entry: the engine rejects an auth without a legend (remove the auth entry or add the legend)",
+			quoteTagList(noLegend))
+	}
+	for id := range legends {
+		if strings.EqualFold(strings.TrimSpace(id), reservedAutoLegendID) {
+			return false, fmt.Errorf("legend id %q is reserved for the synthesized rotation group %q: its virtual tag would be the same string (rename the legend, e.g. %q)", id, leafTag(leaf)+"-"+reservedAutoLegendID, "auto-1")
+		}
+	}
+	return true, nil
+}
+
+// quoteTagList renders ids as `"a", "b"` for drop reasons.
+func quoteTagList(ids []string) string {
+	quoted := make([]string, 0, len(ids))
+	for _, id := range ids {
+		quoted = append(quoted, fmt.Sprintf("%q", id))
+	}
+	return strings.Join(quoted, ", ")
+}
+
 func checkOutboundGroup(ctx context.Context, group map[string]interface{}, pool []interface{}, tagSet map[string]bool) (bool, error) {
-	if !groupReferencesKnownTags(group, tagSet) {
-		return false, fmt.Errorf("group references unknown outbound tags")
+	refs, unknown := groupMemberRefs(group, tagSet)
+	if len(refs) == 0 {
+		return false, fmt.Errorf("group declares no member outbounds")
+	}
+	if len(unknown) > 0 {
+		return false, fmt.Errorf("group references unknown outbound tags: %s", quoteTagList(unknown))
 	}
 	out := append([]interface{}{}, pool...)
 	out = append(out, group)
@@ -477,13 +551,13 @@ func stubDirectOutbound() map[string]interface{} {
 	return map[string]interface{}{"type": "direct", "tag": stubTag}
 }
 
+// isOutboundGroupType is the outbound filter's view of isGroupType. Keeping one
+// predicate is load-bearing: when this list was narrower, failover/scatter fell
+// through to checkOutboundLeaf and were validated as leaves in a stub config
+// that has none of their members — every wrapper was dropped with a bogus
+// dependency warning. checkOutboundGroup is the right validator for them.
 func isOutboundGroupType(typ string) bool {
-	switch strings.ToLower(typ) {
-	case "selector", "urltest", "balancer":
-		return true
-	default:
-		return false
-	}
+	return isGroupType(typ)
 }
 
 func outboundTypeRegistered(typ string) bool {
@@ -543,19 +617,52 @@ func leafTagSet(items []interface{}) map[string]bool {
 	return set
 }
 
-func groupReferencesKnownTags(group map[string]interface{}, tagSet map[string]bool) bool {
-	raw := group["outbounds"]
-	list, ok := raw.([]interface{})
-	if !ok || len(list) == 0 {
-		return false
+// groupMemberRefKeys lists the keys a group type uses to name its members,
+// using the engine's own JSON field names:
+//   - selector/urltest/balancer, and failover (option.FailoverOutboundOptions),
+//     name them in "outbounds";
+//   - scatter (option.ScatterOutboundOptions) names them in "paths", plus the
+//     optional split "uplink_paths"/"downlink_paths" pair.
+//
+// A group referencing any other key only would otherwise look reference-free
+// and be dropped as "no member outbounds".
+func groupMemberRefKeys(typ string) []string {
+	switch strings.ToLower(strings.TrimSpace(typ)) {
+	case "scatter":
+		return []string{"paths", "uplink_paths", "downlink_paths"}
+	default:
+		return []string{"outbounds"}
 	}
-	for _, ref := range list {
-		tag := strings.TrimSpace(fmt.Sprint(ref))
-		if tag == "" || !tagSet[tag] {
-			return false
+}
+
+// groupMemberRefs returns every tag the group references across its member keys
+// and the subset the config does not declare. A key with the wrong JSON type is
+// reported as a non-tag reference so the group is dropped rather than passed to
+// the engine, which would reject it later.
+func groupMemberRefs(group map[string]interface{}, tagSet map[string]bool) (refs []string, unknown []string) {
+	typ := leafType(group)
+	for _, key := range groupMemberRefKeys(typ) {
+		raw, present := group[key]
+		if !present {
+			continue
+		}
+		list, ok := raw.([]interface{})
+		if !ok {
+			unknown = append(unknown, "<"+key+" must be an array>")
+			continue
+		}
+		for _, ref := range list {
+			tag := strings.TrimSpace(fmt.Sprint(ref))
+			if tag == "" {
+				continue
+			}
+			refs = append(refs, tag)
+			if !tagSet[tag] {
+				unknown = append(unknown, tag)
+			}
 		}
 	}
-	return true
+	return refs, unknown
 }
 
 func firstRoutableTag(items []interface{}) string {

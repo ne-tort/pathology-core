@@ -104,7 +104,7 @@ func BuildConfig(ctx context.Context, hopts *ClientOptions, inputOpt *ReadOption
 	setLog(&options, hopts)
 	setInbound(&options, hopts)
 	staticIPs := make(map[string][]string)
-	if err := setOutbounds(&options, input, hopts, &staticIPs); err != nil {
+	if err := setOutboundsContext(ctx, &options, input, hopts, &staticIPs); err != nil {
 		return nil, err
 	}
 
@@ -157,7 +157,118 @@ func isOutboundDisabled(tag string, disabled []string) bool {
 	return contains(disabled, tag)
 }
 
+// reservedAutoLegendID is the legend id the builder must never turn into a
+// virtual: the {parent}-auto rotation-group tag is exactly the
+// {parent}-{legend} virtual tag the engine derives for a legend named "auto".
+const reservedAutoLegendID = "auto"
+
+// authorisedLegendIDs returns the sorted legend ids that actually become
+// {parent}-{legend} virtual outbounds. The engine expands a legend only when an
+// auth entry exists for it (option/pathology_expand.go skips the rest), and its
+// own validation never requires the reverse — so this list, not po.Legends, is
+// the truth the synthesized group must name.
+func authorisedLegendIDs(po *option.PathologyOutboundOptions) []string {
+	if po == nil {
+		return nil
+	}
+	ids := make([]string, 0, len(po.Legends))
+	for id := range po.Legends {
+		if _, hasAuth := po.Auth[id]; !hasAuth {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// unauthorisedLegendIDs returns the sorted legend ids that will NOT become
+// virtuals because they have no auth entry — the ids a rotation group must
+// never name.
+func unauthorisedLegendIDs(po *option.PathologyOutboundOptions) []string {
+	if po == nil {
+		return nil
+	}
+	ids := make([]string, 0, len(po.Legends))
+	for id := range po.Legends {
+		if _, hasAuth := po.Auth[id]; !hasAuth {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// legendParentUnusable reports why a pathology legend parent can contribute
+// nothing to the built profile, so the builder must drop it whole rather than
+// emit a group over virtuals that will not exist. Every case below is one the
+// engine rejects at box.New, i.e. a profile that could not start at all:
+//   - no authorised legend. The engine expands a virtual only per auth entry,
+//     so there is nothing to dial, and it rejects the parent itself ("legends
+//     require at least one auth entry"). This is why the parent cannot simply
+//     be kept while the rotation group is omitted.
+//   - an auth entry with no legend ("auth[x] missing legends entry").
+//   - a legend named "auto" WITH auth: its virtual tag is precisely the
+//     synthesized {parent}-auto group tag. adapter/outbound/manager.go replaces
+//     duplicate tags instead of erroring, so the group used to name itself and
+//     self-dial/hang.
+//
+// parser_soft.checkPathologyLegends mirrors these at import time; this is the
+// start-path backstop for a profile that was already persisted.
+func legendParentUnusable(po *option.PathologyOutboundOptions, parent string) (string, bool) {
+	if po == nil {
+		return "", false
+	}
+	for id := range po.Legends {
+		if !strings.EqualFold(strings.TrimSpace(id), reservedAutoLegendID) {
+			continue
+		}
+		if _, hasAuth := po.Auth[id]; hasAuth {
+			return fmt.Sprintf("legend id %q is reserved for the synthesized rotation group %q: its virtual tag would be the same string", id, parent+"-"+reservedAutoLegendID), true
+		}
+	}
+	if len(authorisedLegendIDs(po)) == 0 {
+		return "no legend has an auth entry, so the engine expands no virtual outbound and rejects this parent (add auth for every legend, or drop the legends block)", true
+	}
+	if orphan := authWithoutLegendIDs(po); len(orphan) > 0 {
+		return fmt.Sprintf("auth %s has no legends entry and the engine rejects the parent for it", quoteTagList(orphan)), true
+	}
+	return "", false
+}
+
+// authWithoutLegendIDs returns the sorted auth keys that name no legend.
+func authWithoutLegendIDs(po *option.PathologyOutboundOptions) []string {
+	if po == nil {
+		return nil
+	}
+	ids := make([]string, 0, len(po.Auth))
+	for id := range po.Auth {
+		if _, ok := po.Legends[id]; !ok {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// warnLegendParentNotEmitted surfaces a legend parent that produced no rotation
+// group. Silent skipping is what made Defect A invisible: the leaf passed parse
+// validation in isolation and died at box.New. The record goes through the same
+// parse-warning channel as every other soft-parse drop so the UI can surface it.
+func warnLegendParentNotEmitted(ctx context.Context, tag, reason string) {
+	fmt.Printf("[SingboxParser] pathology legend parent %q: %s\n", tag, reason)
+	parseWarningsFrom(ctx).addDrop("outbound", C.TypePathology, tag, reason)
+}
+
+// setOutbounds is the context-free entry point: callers that do not carry a
+// parse-warning collector (tests, helpers) still build, they just lose the UI
+// snackbar text. BuildConfig goes through setOutboundsContext so legend-parent
+// warnings reach the same channel as every other soft-parse drop.
 func setOutbounds(options *option.Options, input *option.Options, opt *ClientOptions, staticIPs *map[string][]string) error {
+	return setOutboundsContext(context.Background(), options, input, opt, staticIPs)
+}
+
+func setOutboundsContext(ctx context.Context, options *option.Options, input *option.Options, opt *ClientOptions, staticIPs *map[string][]string) error {
 	var outbounds []option.Outbound
 	var endpoints []option.Endpoint
 	var tags []string
@@ -165,6 +276,10 @@ func setOutbounds(options *option.Options, input *option.Options, opt *ClientOpt
 	// parents: user-selectable (selector), but never members of lowest/balance
 	// (a rotation group is not an exit leaf).
 	var rotationTags []string
+	// skippedLegendParents names legend parents that produced no rotation group
+	// (no authorised legend / reserved group tag). Tracked so the Direct-fallback
+	// guard can explain itself instead of blaming the IPv6/disabled filters.
+	var skippedLegendParents []string
 	OutboundMainDetour = OutboundSelectTag
 	detours := resolvedChainDetours(opt.Chain)
 	knownExits := chainKnownExitSet(input)
@@ -222,17 +337,42 @@ func setOutbounds(options *option.Options, input *option.Options, opt *ClientOpt
 			// must not land in lowest/balance (same dangling-dependency trap
 			// as punnel). A pathology outbound WITHOUT legends is a plain leaf.
 			if po, ok := out.Options.(*option.PathologyOutboundOptions); ok && po != nil && len(po.Legends) > 0 {
-				outbounds = append(outbounds, out)
 				// Failure-rotation group over the legend virtuals: the CP emits
 				// only the parent; the group's members ({parent}-{legend}) exist
 				// after the engine's ExpandPathologyOutbounds (box.New expands
 				// before resolving dependencies, proven by the engine's
 				// pathology_legend_group test).
-				legendIDs := make([]string, 0, len(po.Legends))
-				for id := range po.Legends {
-					legendIDs = append(legendIDs, id)
+				//
+				// Only legends WITH an auth entry become virtuals: the engine's
+				// expand skips legends without auth (option/pathology_expand.go
+				// "if !hasAuth { continue }"). Naming every legend here is the P0
+				// start failure — balancer.Start() then reports
+				// "outbound N not found: {parent}-{legend}" and box.New fails, so
+				// the whole profile cannot start.
+				legendIDs := authorisedLegendIDs(po)
+				if reason, unusable := legendParentUnusable(po, out.Tag); unusable {
+					// Nothing usable can come out of this parent, so it is
+					// dropped whole — not just the group. Keeping it would still
+					// kill the profile: the engine rejects the parent itself at
+					// box.New ("legends require at least one auth entry"), and a
+					// legend named "auto" makes its virtual tag identical to the
+					// group tag. Either way nothing may reference it, and the
+					// warning reaches the UI through the parse-warning channel.
+					warnLegendParentNotEmitted(ctx, out.Tag, "dropped: "+reason)
+					skippedLegendParents = append(skippedLegendParents, out.Tag+": "+reason)
+					continue
 				}
-				sort.Strings(legendIDs)
+				// The parent tag itself is never dialable: ExpandPathologyOutbounds
+				// replaces it with the virtuals and drops the parent, so the tag
+				// must not land in tags or lowest/balance either.
+				outbounds = append(outbounds, out)
+				if unauthorised := unauthorisedLegendIDs(po); len(unauthorised) > 0 {
+					// Auth present but a legend lacks it. parser_soft rejects
+					// that leaf, so this only reaches the start path for an
+					// already-persisted profile: log it, but do not mark the
+					// surviving parent as dropped.
+					fmt.Printf("[SingboxParser] pathology legend parent %q: legend %s has no auth entry and is left out of the rotation group (the engine expands no virtual for it)\n", out.Tag, quoteTagList(unauthorised))
+				}
 				virtuals := make([]string, 0, len(legendIDs))
 				for _, id := range legendIDs {
 					virtuals = append(virtuals, out.Tag+"-"+id)
@@ -459,6 +599,11 @@ func setOutbounds(options *option.Options, input *option.Options, opt *ClientOpt
 		// Never silently turn a VPN profile into Direct. Only allow Direct-only
 		// when the input itself had no proxy leaves (explicit Direct / empty stub).
 		if n := countInputProxyLeaves(input); n > 0 {
+			// Every leaf was a legend parent we could not group: name the real
+			// cause instead of blaming the IPv6/disabled filters.
+			if len(skippedLegendParents) == n {
+				return fmt.Errorf("refusing Direct fallback: every proxy leaf is a pathology legend parent without a usable rotation group (%s)", strings.Join(skippedLegendParents, "; "))
+			}
 			return fmt.Errorf("refusing Direct fallback: %d proxy leaf(ves) were dropped (IPv6 filter, disabled tags, or parse)", n)
 		}
 		selector := option.Outbound{

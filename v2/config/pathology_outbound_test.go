@@ -1,41 +1,122 @@
 package config
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 )
 
+// testLegendPSK is valid morph auth material (hex, ≥16 bytes) so the engine's
+// own legend expansion accepts the fixture.
+const testLegendPSK = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+
+// pathologyLegendOutbound builds a legend parent as the CP emits it: server +
+// legends (per-legend underlay) + auth for the legends whose id is in authIDs.
+// A legend present in legends but absent from authIDs is exactly the shape that
+// used to break start (the engine skips it, the builder still named it).
+func pathologyLegendOutbound(tag string, legendIDs, authIDs []string) option.Outbound {
+	legends := make(map[string]option.PathologyLegendEntry, len(legendIDs))
+	for _, id := range legendIDs {
+		legends[id] = option.PathologyLegendEntry{
+			Underlay: option.PathologyUnderlayOptions{Branch: "udp"},
+		}
+	}
+	var auth map[string]option.PathologyLegendAuth
+	if len(authIDs) > 0 {
+		auth = make(map[string]option.PathologyLegendAuth, len(authIDs))
+		for _, id := range authIDs {
+			auth[id] = option.PathologyLegendAuth{Method: "morph", PSK: testLegendPSK}
+		}
+	}
+	return option.Outbound{
+		Type: C.TypePathology,
+		Tag:  tag,
+		Options: &option.PathologyOutboundOptions{
+			ServerOptions: option.ServerOptions{Server: "1.2.3.4", ServerPort: 10443},
+			UUID:          "387c6b84-2e30-4b67-83c9-aa5692550e65",
+			Legends:       legends,
+			Auth:          auth,
+		},
+	}
+}
+
+func testVLESSLeaf(tag string) option.Outbound {
+	return option.Outbound{
+		Type:    C.TypeVLESS,
+		Tag:     tag,
+		Options: &option.VLESSOutboundOptions{DialerOptions: option.DialerOptions{}},
+	}
+}
+
+// buildOutbounds runs setOutbounds with a parse-warning collector so tests can
+// assert both the emitted outbounds and the UI-facing drop reasons.
+func buildOutbounds(t *testing.T, input *option.Options) (option.Options, *ParseWarningsCollector) {
+	t.Helper()
+	ctx, collector := WithParseWarnings(context.Background())
+	var out option.Options
+	if err := setOutboundsContext(ctx, &out, input, DefaultClientOptions(), &map[string][]string{}); err != nil {
+		t.Fatalf("setOutbounds: %v", err)
+	}
+	return out, collector
+}
+
+// findRotationGroup returns the "{parent}-auto" balancer, or nil.
+func findRotationGroup(out option.Options, parent string) *option.BalancerOutboundOptions {
+	for i := range out.Outbounds {
+		if out.Outbounds[i].Tag != parent+"-auto" {
+			continue
+		}
+		opts, _ := out.Outbounds[i].Options.(*option.BalancerOutboundOptions)
+		return opts
+	}
+	return nil
+}
+
+// assertGroupsReferenceLiveTags expands the pathology parents exactly as
+// box.New does and fails if any group member names a tag that does not exist
+// afterwards. This is the P0 invariant: a member naming a skipped legend made
+// balancer.Start() fail with "outbound N not found" and box.New killed the whole
+// profile. It covers selector/lowest/balance and the rotation groups alike.
+func assertGroupsReferenceLiveTags(t *testing.T, out option.Options) {
+	t.Helper()
+	expanded, err := option.ExpandPathologyOutbounds(out.Outbounds)
+	if err != nil {
+		t.Fatalf("engine expansion of the built outbounds failed: %v", err)
+	}
+	live := make(map[string]bool, len(expanded))
+	for _, o := range expanded {
+		live[o.Tag] = true
+	}
+	for _, o := range expanded {
+		var members []string
+		switch opts := o.Options.(type) {
+		case *option.BalancerOutboundOptions:
+			members = opts.Outbounds
+		case *option.SelectorOutboundOptions:
+			members = opts.Outbounds
+		}
+		for _, member := range members {
+			if !live[member] {
+				t.Fatalf("outbound %q (%s) references missing outbound %q; live tags: %v", o.Tag, o.Type, member, live)
+			}
+		}
+	}
+}
+
 // Legend parent: box.ExpandPathologyOutbounds replaces it with
 // {parent}-{legend} virtuals at engine start, so the parent tag must stay out
 // of lowest/balance (same dangling-dependency trap as punnel).
 func TestPathologyLegendParentExcludedFromBalancerLeaves(t *testing.T) {
-	opt := DefaultClientOptions()
 	input := &option.Options{
 		Outbounds: []option.Outbound{
-			{
-				Type: C.TypeVLESS,
-				Tag:  "node-a",
-				Options: &option.VLESSOutboundOptions{
-					DialerOptions: option.DialerOptions{},
-				},
-			},
-			{
-				Type: C.TypePathology,
-				Tag:  "path-parent",
-				Options: &option.PathologyOutboundOptions{
-					Legends: map[string]option.PathologyLegendEntry{
-						"stun": {},
-					},
-				},
-			},
+			testVLESSLeaf("node-a"),
+			pathologyLegendOutbound("path-parent", []string{"stun"}, []string{"stun"}),
 		},
 	}
-	var out option.Options
-	if err := setOutbounds(&out, input, opt, &map[string][]string{}); err != nil {
-		t.Fatal(err)
-	}
+	out, _ := buildOutbounds(t, input)
 
 	foundParent := false
 	for _, o := range out.Outbounds {
@@ -50,8 +131,8 @@ func TestPathologyLegendParentExcludedFromBalancerLeaves(t *testing.T) {
 			t.Fatalf("%s: expected balancer options", o.Tag)
 		}
 		for _, tag := range opts.Outbounds {
-			if tag == "path-parent" {
-				t.Fatalf("%s includes legend-parent tag path-parent", o.Tag)
+			if tag == "path-parent" || tag == "path-parent-auto" {
+				t.Fatalf("%s includes legend-parent tag %q", o.Tag, tag)
 			}
 		}
 		if len(opts.Outbounds) != 1 || opts.Outbounds[0] != "node-a" {
@@ -61,6 +142,7 @@ func TestPathologyLegendParentExcludedFromBalancerLeaves(t *testing.T) {
 	if !foundParent {
 		t.Fatal("path-parent outbound missing from built config")
 	}
+	assertGroupsReferenceLiveTags(t, out)
 }
 
 // A pathology outbound WITHOUT legends is an ordinary dialable leaf.
@@ -108,81 +190,249 @@ func TestChainNeverDetoursGroupWrappers(t *testing.T) {
 	}
 }
 
-// A legend parent gets a synthesized first-alive rotation group over its
-// {parent}-{legend} virtuals: in the selector (user-selectable), never in
-// lowest/balance member pools (a rotation group is not an exit leaf).
+// A legend parent gets a synthesized first-alive rotation group over the
+// {parent}-{legend} virtuals the engine actually materialises — i.e. only the
+// legends that carry an auth entry. Naming a legend without auth was the P0:
+// balancer.Start() then reports a missing outbound and box.New fails, so the
+// profile cannot start at all.
 func TestPathologyLegendParentSynthesizesRotationGroup(t *testing.T) {
-	opt := DefaultClientOptions()
 	input := &option.Options{
 		Outbounds: []option.Outbound{
-			{
-				Type: C.TypeVLESS,
-				Tag:  "node-a",
-				Options: &option.VLESSOutboundOptions{
-					DialerOptions: option.DialerOptions{},
-				},
-			},
-			{
-				Type: C.TypePathology,
-				Tag:  "path-auto",
-				Options: &option.PathologyOutboundOptions{
-					ServerOptions: option.ServerOptions{Server: "1.2.3.4"},
-					Legends: map[string]option.PathologyLegendEntry{
-						"stun": {}, "dns": {},
-					},
-				},
-			},
+			testVLESSLeaf("node-a"),
+			pathologyLegendOutbound("path-auto", []string{"stun", "dns"}, []string{"stun", "dns"}),
 		},
 	}
-	var out option.Options
-	if err := setOutbounds(&out, input, opt, &map[string][]string{}); err != nil {
-		t.Fatal(err)
+	out, _ := buildOutbounds(t, input)
+
+	group := findRotationGroup(out, "path-auto")
+	if group == nil {
+		t.Fatal("rotation group path-auto-auto not synthesized")
+	}
+	if group.Strategy != "first-alive" {
+		t.Fatalf("want first-alive, got %q", group.Strategy)
+	}
+	if !group.InterruptExistConnections {
+		t.Fatal("rotation group must interrupt dead-pick connections")
+	}
+	want := []string{"path-auto-dns", "path-auto-stun"} // sorted
+	if len(group.Outbounds) != len(want) || group.Outbounds[0] != want[0] || group.Outbounds[1] != want[1] {
+		t.Fatalf("rotation group members = %v, want %v", group.Outbounds, want)
 	}
 
-	var group *option.Outbound
-	for i := range out.Outbounds {
-		o := &out.Outbounds[i]
-		if o.Tag == "path-auto-auto" {
-			group = o
+	for _, o := range out.Outbounds {
+		if o.Tag != OutboundRoundRobinTag && o.Tag != OutboundURLTestTag {
+			continue
 		}
-		if o.Tag == OutboundRoundRobinTag || o.Tag == OutboundURLTestTag {
-			opts := o.Options.(*option.BalancerOutboundOptions)
-			for _, tag := range opts.Outbounds {
-				if tag == "path-auto" || tag == "path-auto-auto" {
-					t.Fatalf("%s must not contain the legend parent or its rotation group (got %v)", o.Tag, opts.Outbounds)
+		opts, ok := o.Options.(*option.BalancerOutboundOptions)
+		if !ok {
+			continue
+		}
+		for _, tag := range opts.Outbounds {
+			if tag == "path-auto" || tag == "path-auto-auto" {
+				t.Fatalf("%s must not contain the legend parent or its rotation group (got %v)", o.Tag, opts.Outbounds)
+			}
+		}
+	}
+
+	// Selector lists the rotation group (user-selectable).
+	foundInSelector := false
+	for _, o := range out.Outbounds {
+		if o.Tag != OutboundSelectTag {
+			continue
+		}
+		sel, ok := o.Options.(*option.SelectorOutboundOptions)
+		if !ok {
+			continue
+		}
+		for _, tag := range sel.Outbounds {
+			if tag == "path-auto-auto" {
+				foundInSelector = true
+			}
+		}
+	}
+	if !foundInSelector {
+		t.Fatal("selector must list the rotation group")
+	}
+	assertGroupsReferenceLiveTags(t, out)
+}
+
+// Table over the legend/auth shapes: the rotation group must name exactly the
+// virtuals the engine materialises, and every case must leave a config with no
+// dangling reference (the old code emitted "path-t-auto" and "path-t-stun" while
+// the engine only created "path-t-dns").
+func TestPathologyRotationGroupMembership(t *testing.T) {
+	tests := []struct {
+		name       string
+		legends    []string
+		auth       []string
+		wantGroup  bool
+		wantMember []string
+		wantWarn   string
+	}{
+		{
+			name:       "every legend authorised",
+			legends:    []string{"dns", "stun"},
+			auth:       []string{"dns", "stun"},
+			wantGroup:  true,
+			wantMember: []string{"path-t-dns", "path-t-stun"},
+		},
+		{
+			name:       "legend without auth is excluded",
+			legends:    []string{"dns", "stun"},
+			auth:       []string{"dns"},
+			wantGroup:  true,
+			wantMember: []string{"path-t-dns"},
+		},
+		{
+			name:      "no auth at all emits no group",
+			legends:   []string{"dns", "stun"},
+			auth:      nil,
+			wantGroup: false,
+			wantWarn:  "no legend has an auth entry",
+		},
+		{
+			name:      "reserved auto legend emits no group",
+			legends:   []string{"auto", "dns"},
+			auth:      []string{"auto", "dns"},
+			wantGroup: false,
+			wantWarn:  "reserved for the synthesized rotation group",
+		},
+		{
+			// auth "ssh" has no legends entry: the engine rejects the parent
+			// at box.New, so it must never reach the built config.
+			name:      "orphan auth emits no group",
+			legends:   []string{"dns"},
+			auth:      []string{"dns", "ssh"},
+			wantGroup: false,
+			wantWarn:  "has no legends entry",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// A second, independent leaf keeps the profile non-empty so the
+			// builder cannot short-circuit into the Direct-fallback guard.
+			input := &option.Options{
+				Outbounds: []option.Outbound{
+					testVLESSLeaf("node-a"),
+					pathologyLegendOutbound("path-t", tc.legends, tc.auth),
+				},
+			}
+			out, warns := buildOutbounds(t, input)
+			group := findRotationGroup(out, "path-t")
+
+			if !tc.wantGroup {
+				if group != nil {
+					t.Fatalf("rotation group must not be emitted, got members %v", group.Outbounds)
+				}
+				msg := warns.MessageJSON()
+				if !strings.Contains(msg, tc.wantWarn) {
+					t.Fatalf("warning %q missing from parse warnings %s", tc.wantWarn, msg)
+				}
+				// The parent is dropped whole, not just left ungrouped: the
+				// engine rejects it at box.New (no auth) or its virtual would
+				// collide with the group tag ("auto"). Nothing may reference it.
+				for _, o := range out.Outbounds {
+					if o.Tag == "path-t" {
+						t.Fatal("unusable legend parent must be dropped, not emitted")
+					}
+				}
+				assertNoGroupReferences(t, out, "path-t", "path-t-auto")
+				// Every remaining group must still resolve after expansion.
+				assertGroupsReferenceLiveTags(t, out)
+				return
+			}
+
+			if group == nil {
+				t.Fatal("rotation group path-t-auto not synthesized")
+			}
+			if len(group.Outbounds) != len(tc.wantMember) {
+				t.Fatalf("members = %v, want %v", group.Outbounds, tc.wantMember)
+			}
+			for i, want := range tc.wantMember {
+				if group.Outbounds[i] != want {
+					t.Fatalf("members = %v, want %v", group.Outbounds, tc.wantMember)
+				}
+			}
+			if msg := warns.MessageJSON(); msg != "" {
+				t.Fatalf("unexpected parse warning for a clean legend parent: %s", msg)
+			}
+			assertGroupsReferenceLiveTags(t, out)
+		})
+	}
+}
+
+// assertNoGroupReferences fails when selector/lowest/balance name any of tags.
+func assertNoGroupReferences(t *testing.T, out option.Options, tags ...string) {
+	t.Helper()
+	for _, o := range out.Outbounds {
+		var members []string
+		switch opts := o.Options.(type) {
+		case *option.SelectorOutboundOptions:
+			members = opts.Outbounds
+		case *option.BalancerOutboundOptions:
+			members = opts.Outbounds
+		}
+		for _, member := range members {
+			for _, banned := range tags {
+				if member == banned {
+					t.Fatalf("outbound %q references %q, which cannot dial", o.Tag, banned)
 				}
 			}
 		}
 	}
-	if group == nil {
-		t.Fatal("rotation group path-auto-auto not synthesized")
-	}
-	opts := group.Options.(*option.BalancerOutboundOptions)
-	if opts.Strategy != "first-alive" {
-		t.Fatalf("want first-alive, got %q", opts.Strategy)
-	}
-	if !opts.InterruptExistConnections {
-		t.Fatal("rotation group must interrupt dead-pick connections")
-	}
-	want := []string{"path-auto-dns", "path-auto-stun"} // sorted
-	if len(opts.Outbounds) != 2 || opts.Outbounds[0] != want[0] || opts.Outbounds[1] != want[1] {
-		t.Fatalf("rotation group members = %v, want %v", opts.Outbounds, want)
-	}
+}
 
-	// Selector lists the rotation group (user-selectable).
+// A pathology-only profile whose legend parent has no authorised legend has no
+// dialable outbound at all: the engine expands zero virtuals. The builder must
+// refuse loudly and by name instead of the generic Direct-fallback message, and
+// must never synthesize a group over virtuals that will not exist.
+func TestPathologyNoAuthorisedLegendRefusesStart(t *testing.T) {
+	input := &option.Options{
+		Outbounds: []option.Outbound{
+			pathologyLegendOutbound("path-only", []string{"stun"}, nil),
+		},
+	}
+	var out option.Options
+	err := setOutbounds(&out, input, DefaultClientOptions(), &map[string][]string{})
+	if err == nil {
+		t.Fatal("expected a build error: nothing in this profile can dial")
+	}
+	if !strings.Contains(err.Error(), "path-only") || !strings.Contains(err.Error(), "no legend has an auth entry") {
+		t.Fatalf("error must name the parent and the cause, got %v", err)
+	}
+}
+
+// With a healthy sibling leaf the profile must build: the unusable legend
+// parent contributes no group, no selector reference, no outbound at all, and a
+// warning the UI can surface — never a start-breaking member list.
+func TestPathologyNoAuthorisedLegendWarnsInsteadOfEmittingGroup(t *testing.T) {
+	input := &option.Options{
+		Outbounds: []option.Outbound{
+			testVLESSLeaf("node-a"),
+			pathologyLegendOutbound("path-only", []string{"stun"}, nil),
+		},
+	}
+	out, warns := buildOutbounds(t, input)
+	if g := findRotationGroup(out, "path-only"); g != nil {
+		t.Fatalf("rotation group must not be emitted, got %v", g.Outbounds)
+	}
+	for _, o := range out.Outbounds {
+		if o.Tag == "path-only" {
+			t.Fatal("legend parent the engine would reject must not be emitted")
+		}
+	}
+	if !strings.Contains(warns.MessageJSON(), "no legend has an auth entry") {
+		t.Fatalf("missing warning: %s", warns.MessageJSON())
+	}
+	assertNoGroupReferences(t, out, "path-only", "path-only-auto")
+	// The healthy leaf still drives the profile.
 	for _, o := range out.Outbounds {
 		if o.Tag != OutboundSelectTag {
 			continue
 		}
 		sel := o.Options.(*option.SelectorOutboundOptions)
-		found := false
-		for _, tag := range sel.Outbounds {
-			if tag == "path-auto-auto" {
-				found = true
-			}
-		}
-		if !found {
-			t.Fatal("selector must list the rotation group")
+		if len(sel.Outbounds) != 1 || sel.Outbounds[0] != "node-a" {
+			t.Fatalf("selector outbounds = %v, want [node-a]", sel.Outbounds)
 		}
 	}
 }
