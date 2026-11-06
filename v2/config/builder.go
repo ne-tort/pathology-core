@@ -585,8 +585,19 @@ func setOutboundsContext(ctx context.Context, options *option.Options, input *op
 	if opt.BalancerCandidates > 0 {
 		balanceExpected = uint(opt.BalancerCandidates)
 	}
+	// lowest/balance probe DIALABLE leaves. A pathology legend parent is not one
+	// (the engine replaces it with {parent}-{legend} virtuals), so the rotation
+	// group is what a pathology-only profile can actually dial — and with an
+	// empty member list box.New rejects the whole config with
+	// "initialize outbound[1]: missing tags", because both balancers are appended
+	// unconditionally. So: leaves when there are any, rotation groups only as the
+	// fallback pool.
+	balancerTags := tags
+	if len(balancerTags) == 0 {
+		balancerTags = rotationTags
+	}
 	lowestOpts := &option.BalancerOutboundOptions{
-		Outbounds:                 tags,
+		Outbounds:                 balancerTags,
 		Default:                   preferred,
 		Strategy:                  "lowest-delay",
 		DelayAcceptableRatio:      2,
@@ -598,7 +609,7 @@ func setOutboundsContext(ctx context.Context, options *option.Options, input *op
 		URLs:                      probeLinks,
 	}
 	balanceOpts := &option.BalancerOutboundOptions{
-		Outbounds:                 tags,
+		Outbounds:                 balancerTags,
 		Default:                   preferred,
 		Strategy:                  normalizeBalancerStrategy(opt.BalancerStrategy),
 		DelayAcceptableRatio:      2,

@@ -558,3 +558,54 @@ func TestWrapperOverDroppedLegendParentIsDropped(t *testing.T) {
 		t.Fatalf("the dropped reference must be reported: %s", collector.MessageJSON())
 	}
 }
+
+// A pathology-only profile has no dialable leaves, and lowest/balance are
+// appended unconditionally — with an empty member list box.New rejects the whole
+// config ("initialize outbound[1]: missing tags"). The rotation group is the
+// only thing such a profile can dial, so it becomes the fallback pool; a mixed
+// profile keeps probing leaves only.
+func TestPathologyOnlyProfileGetsBalancerFallbackPool(t *testing.T) {
+	onlyParent := &option.Options{
+		Outbounds: []option.Outbound{
+			pathologyLegendOutbound("path-auto", []string{"stun", "dns"}, []string{"stun", "dns"}),
+		},
+	}
+	out, _ := buildOutbounds(t, onlyParent)
+	for _, o := range out.Outbounds {
+		if o.Tag != OutboundURLTestTag && o.Tag != OutboundRoundRobinTag {
+			continue
+		}
+		opts, _ := o.Options.(*option.BalancerOutboundOptions)
+		if opts == nil || len(opts.Outbounds) == 0 {
+			t.Fatalf("%s must not be empty for a pathology-only profile", o.Tag)
+		}
+		if len(opts.Outbounds) != 1 || opts.Outbounds[0] != "path-auto-auto" {
+			t.Fatalf("%s pool = %v, want [path-auto-auto]", o.Tag, opts.Outbounds)
+		}
+	}
+	assertGroupsReferenceLiveTags(t, out)
+
+	// Mixed profile: the leaf is what gets probed; the rotation group stays
+	// selectable under `select` but out of the latency pools.
+	mixed := &option.Options{
+		Outbounds: []option.Outbound{
+			pathologyLegendOutbound("path-auto", []string{"stun"}, []string{"stun"}),
+			testVLESSLeaf("node-a"),
+		},
+	}
+	outMixed, _ := buildOutbounds(t, mixed)
+	for _, o := range outMixed.Outbounds {
+		if o.Tag != OutboundURLTestTag && o.Tag != OutboundRoundRobinTag {
+			continue
+		}
+		opts, _ := o.Options.(*option.BalancerOutboundOptions)
+		if opts == nil {
+			continue
+		}
+		for _, tag := range opts.Outbounds {
+			if tag == "path-auto-auto" {
+				t.Fatalf("%s must not probe the rotation group when real leaves exist: %v", o.Tag, opts.Outbounds)
+			}
+		}
+	}
+}
