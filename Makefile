@@ -148,7 +148,7 @@ build-linux: prepare
 	mkdir lib
 	cp $(BINDIR)/lib/$(LIBNAME).so ./lib/$(LIBNAME).so
 
-	GOOS=linux GOARCH=$(ARCH) CGO_LDFLAGS="./lib/$(LIBNAME).so -Wl,-rpath,\$$ORIGIN/lib -fuse-ld=lld" $(GOBUILDSRV) -o $(BINDIR)/$(CLINAME) ./cmd/bydll
+	GOOS=linux GOARCH=$(ARCH) CGO_LDFLAGS="-L./lib -l:$(LIBNAME).so -Wl,-rpath,\$$ORIGIN/lib:/opt/pathology/lib -fuse-ld=lld" $(GOBUILDSRV) -o $(BINDIR)/$(CLINAME) ./cmd/bydll
 	
 	rm -rf ./lib/*.so
 	chmod +x $(BINDIR)/$(CLINAME)

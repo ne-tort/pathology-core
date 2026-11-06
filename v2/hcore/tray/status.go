@@ -37,23 +37,28 @@ const transitionPollCeiling = 10 * time.Second
 const transitionPollInterval = 300 * time.Millisecond
 
 func applyTrayIcon(state hcore.CoreStates, darkTheme bool) {
+	// The icon must contrast with the *panel*, which is not the same thing as
+	// the app theme: Ubuntu's top bar is #131313 even in the default (light)
+	// Yaru scheme, so the dark glyph vanished there. useLightTrayIcon decides.
+	light := useLightTrayIcon(darkTheme)
+	disconnected, connecting, connected := trayIconSet(light)
 	var icon []byte
 	switch state {
 	case hcore.CoreStates_STARTED:
 		trayErrorState.Store(false)
-		icon = trayIconConnected
+		icon = connected
 	case hcore.CoreStates_STARTING, hcore.CoreStates_STOPPING:
-		icon = trayIconConnecting
+		icon = connecting
 	default:
 		switch {
 		case trayErrorState.Load():
 			// Stopped after a failed session action: red-on-black error icon
 			// (same asset as the transition red; semantics via state).
-			icon = trayIconConnecting
-		case darkTheme:
-			icon = trayIconDark
+			icon = connecting
+		case light:
+			icon = disconnected
 		default:
-			icon = trayIconDisconnected
+			icon = trayIconDark
 		}
 	}
 	if len(icon) > 0 {

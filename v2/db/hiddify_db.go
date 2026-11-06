@@ -3,14 +3,18 @@ package db
 import (
 	"bytes"
 	"encoding/gob"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
+	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/opt"
 	tmdb "github.com/tendermint/tm-db"
 )
@@ -88,9 +92,80 @@ func openGoLevelDB(name string) (tmdb.DB, error) {
 		}
 		lastErr = err
 		log.Printf("Failed attempt %d to open leveldb %s: %v", i+1, name, err)
+		if isLockConflict(err) {
+			// Another LIVE process holds the DB file lock (e.g. a second
+			// PathologyCli racing this one). Recover/quarantine below would
+			// rename the directory out from under that process and silently
+			// wipe its data — settings/profiles "rolled back" after the
+			// fact. Surface the conflict instead.
+			break
+		}
 		time.Sleep(openRetryDelay)
 	}
+	if isLockConflict(lastErr) {
+		return nil, fmt.Errorf("leveldb %s is locked by another process: %w", name, lastErr)
+	}
+	// Open keeps failing (corrupted journals/SSTs after disk-full or power loss).
+	if db, rerr := recoverGoLevelDB(name); rerr == nil {
+		log.Printf("leveldb %s: recovered from corruption (open error was: %v)", name, lastErr)
+		return db, nil
+	} else {
+		log.Printf("leveldb %s: recovery failed: %v (open error was: %v)", name, rerr, lastErr)
+	}
+	if db, qerr := quarantineAndReopen(name); qerr == nil {
+		log.Printf("leveldb %s: quarantined corrupted database, starting fresh (open error was: %v)", name, lastErr)
+		return db, nil
+	} else {
+		log.Printf("leveldb %s: quarantine failed: %v (open error was: %v)", name, qerr, lastErr)
+	}
 	return nil, lastErr
+}
+
+// isLockConflict reports whether err is a file-lock conflict with a live
+// process rather than corruption. goleveldb surfaces flock failures as
+// *os.SyscallError (EWOULDBLOCK / EAGAIN on POSIX, a sharing violation on
+// Windows).
+func isLockConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	var sysErr *os.SyscallError
+	if errors.As(err, &sysErr) {
+		if errors.Is(sysErr.Err, syscall.EWOULDBLOCK) || errors.Is(sysErr.Err, syscall.EAGAIN) {
+			return true
+		}
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "temporarily unavailable") ||
+		strings.Contains(msg, "being used by another process") ||
+		strings.Contains(msg, "sharing violation")
+}
+
+func goLevelDBPath(name string) string { return filepath.Join(dataDir, name+".db") }
+
+func recoverGoLevelDB(name string) (tmdb.DB, error) {
+	rdb, err := leveldb.RecoverFile(goLevelDBPath(name), &opt.Options{})
+	if err != nil {
+		return nil, err
+	}
+	if err := rdb.Close(); err != nil {
+		return nil, err
+	}
+	return tmdb.NewGoLevelDBWithOpts(name, dataDir, &opt.Options{})
+}
+
+func quarantineAndReopen(name string) (tmdb.DB, error) {
+	path := goLevelDBPath(name)
+	quarantine := fmt.Sprintf("%s.corrupt-%s", path, time.Now().Format("20060102-150405"))
+	if err := os.Rename(path, quarantine); err != nil {
+		return nil, err
+	}
+	db, err := tmdb.NewGoLevelDBWithOpts(name, dataDir, &opt.Options{})
+	if err != nil {
+		_ = os.Rename(quarantine, path)
+		return nil, err
+	}
+	return db, nil
 }
 
 func countDBFiles(name string) int {
