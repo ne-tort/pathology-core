@@ -67,6 +67,11 @@ func MigrateLegacyJSON(root map[string]interface{}) []string {
 	}
 	migrateRouteDirectAction(root, &warnings)
 	migrateGeoRules(root, &warnings)
+	// Legacy DNS forms (address servers, dns.fakeip, rcode servers, dangling
+	// server references) are a decode error on 1.5, not a validation error, so
+	// they have to be rewritten before the document is decoded — exactly like
+	// the outbound keys above. See migrate_dns.go.
+	migrateDNS(root, &warnings)
 	migrateLegacyInboundFields(root, &warnings)
 	return warnings
 }
@@ -95,6 +100,11 @@ func walkMaps(v interface{}, visit func(map[string]interface{})) {
 // chrome_parrot:true → utls.fingerprint=chrome; disable_chrome_parrot:true →
 // fingerprint=quic-go. Applies wherever the keys appear (protocol root,
 // v2ray transport blocks, dns servers).
+//
+// A `utls` value that is not a JSON object is never overwritten: the user wrote
+// something there, the persona key cannot be folded into it, and guessing a
+// replacement would silently discard the value. The keys are dropped and the
+// non-object `utls` is left for the engine to accept or reject on its own terms.
 func migrateParrotKeys(m map[string]interface{}, warnings *[]string) {
 	parrot, hasParrot := m["chrome_parrot"]
 	disable, hasDisable := m["disable_chrome_parrot"]
@@ -131,8 +141,32 @@ func migrateParrotKeys(m map[string]interface{}, warnings *[]string) {
 		*warnings = append(*warnings, "legacy QUIC parrot key migrated to utls.fingerprint="+fp)
 		return
 	}
+	if rawUTLS, present := m["utls"]; present {
+		*warnings = append(*warnings, fmt.Sprintf("legacy QUIC parrot key dropped (utls is %s, not an object, so fingerprint=%s could not be applied to it)", jsonValueKind(rawUTLS), fp))
+		return
+	}
 	m["utls"] = map[string]interface{}{"enabled": true, "fingerprint": fp}
 	*warnings = append(*warnings, "legacy QUIC parrot key migrated to utls.fingerprint="+fp)
+}
+
+// jsonValueKind names a decoded JSON value for a warning, in the words a config
+// author would use.
+func jsonValueKind(value interface{}) string {
+	switch value.(type) {
+	case nil:
+		return "null"
+	case bool:
+		return "a boolean"
+	case string:
+		return "a string"
+	case float64, float32, int, int64:
+		return "a number"
+	case []interface{}:
+		return "an array"
+	case map[string]interface{}:
+		return "an object"
+	}
+	return fmt.Sprintf("a %T", value)
 }
 
 // migrateHysteriaBandwidth: hy/hy2 up_mbps/down_mbps/up/down/brutal_debug/

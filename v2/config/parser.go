@@ -72,6 +72,7 @@ func parseConfigContent(ctx context.Context, content []byte, debug bool, configO
 	jsonDecoder := json.NewDecoder(SJ.NewCommentFilter(bytes.NewReader(content)))
 	if err := jsonDecoder.Decode(&tmpJsonResult); err == nil {
 		fmt.Printf("Convert using json\n")
+		isConfig := true
 		if tmpJsonObj, ok := tmpJsonResult.(map[string]interface{}); ok {
 			if tmpJsonObj["outbounds"] == nil && tmpJsonObj["endpoints"] == nil {
 				// Empty object → empty profile (WARP-only etc.). Non-empty object → single outbound wrap.
@@ -99,20 +100,30 @@ func parseConfigContent(ctx context.Context, content []byte, debug bool, configO
 					}
 				}
 			}
-		} else if jsonArray, ok := tmpJsonResult.([]map[string]interface{}); ok {
-			jsonObj["outbounds"] = jsonArray
-		} else if jsonArray, ok := tmpJsonResult.([]interface{}); ok {
+		} else if jsonArray, ok := jsonArrayOfObjects(tmpJsonResult); ok {
+			// A bare array is the "list of outbounds" shorthand. Every entry has
+			// to be an object: an empty array (or an array of scalars) is not a
+			// sing-box config, and accepting it produced a successful
+			// {"outbounds":[]} — an empty profile for a body that carries none.
 			jsonObj["outbounds"] = jsonArray
 		} else {
-			return nil, fmt.Errorf("[SingboxParser] Incorrect Json Format")
+			// JSON null and every scalar: valid JSON that declares no config.
+			// option.Options would decode it into a zero value, i.e. a success
+			// with no profile at all, so it is not treated as a sing-box
+			// document — the remaining detectors still get their turn below and
+			// the caller ends with "unable to determine config format".
+			fmt.Printf("[SingboxParser] JSON body is %s, not a sing-box config\n", jsonValueKind(tmpJsonResult))
+			isConfig = false
 		}
 
-		newContent, err := json.MarshalIndent(jsonObj, "", "  ")
-		if err != nil {
-			return nil, fmt.Errorf("[SingboxParser] marshal error: %w", err)
-		}
+		if isConfig {
+			newContent, err := json.MarshalIndent(jsonObj, "", "  ")
+			if err != nil {
+				return nil, fmt.Errorf("[SingboxParser] marshal error: %w", err)
+			}
 
-		return patchConfigStr(ctx, newContent, "SingboxParser", configOpt, fullConfig)
+			return patchConfigStr(ctx, newContent, "SingboxParser", configOpt, fullConfig)
+		}
 	}
 
 	fmt.Printf("Convert using clash\n")
@@ -133,11 +144,25 @@ func parseConfigContent(ctx context.Context, content []byte, debug bool, configO
 		return patchConfigStr(ctx, output, "ClashParser", configOpt, fullConfig)
 	}
 
+	// v2ray path. ray2sing takes share links (and base64 blobs of them): it
+	// builds typed option.Outbound values through the protocol parsers, so the
+	// body is never decoded as raw sing-box JSON. What it *does* emit can still
+	// be 1.4-era — the hysteria link parser turns &upmbps= into `up_mbps`, which
+	// the 1.5 engine rejects — so migrateOptionsJSON below is what makes such a
+	// link importable at all (proved by TestV2RayHysteriaLinkMigratesBandwidth).
+	//
+	// The raw body is nevertheless migrated first: that keeps the invariant
+	// "nothing, converter or engine, ever sees a 1.4 key" true for the whole
+	// path, and costs one decode on a branch that has already failed twice.
+	// Today it cannot change behaviour, because every JSON body is consumed by
+	// the JSON branch above and a non-JSON one fails this decode as well — see
+	// the note on migrateRawJSONForV2Ray.
+	if migratedRaw, migrated := migrateRawJSONForV2Ray(ctx, content); migrated {
+		content = migratedRaw
+	}
+
 	v2ray, err := ray2sing.Ray2SingboxOptions(ctx, string(content), false)
 	if err == nil {
-		// ray2sing emits 1.4-era keys (chrome_parrot, hy bandwidth, action direct,
-		// …) that the 1.5 engine hard-rejects; run the same migration the JSON and
-		// Clash paths get, instead of handing the raw conversion to the parser.
 		if migrated, mErr := migrateOptionsJSON(ctx, v2ray); mErr != nil {
 			return nil, fmt.Errorf("[V2rayParser] migrate 1.4→1.5: %w", mErr)
 		} else if migrated != nil {
@@ -147,6 +172,61 @@ func parseConfigContent(ctx context.Context, content []byte, debug bool, configO
 	}
 
 	return nil, fmt.Errorf("unable to determine config format")
+}
+
+// jsonArrayOfObjects returns the entries of a decoded JSON array when every one
+// of them is a JSON object, i.e. the documented "list of outbounds" shorthand.
+// An empty array yields false: it declares no outbound, and accepting it turned
+// a body that is not a sing-box config into a successful empty profile.
+func jsonArrayOfObjects(value interface{}) ([]interface{}, bool) {
+	list, ok := value.([]interface{})
+	if !ok || len(list) == 0 {
+		return nil, false
+	}
+	out := make([]interface{}, 0, len(list))
+	for _, item := range list {
+		m, isObject := item.(map[string]interface{})
+		if !isObject {
+			return nil, false
+		}
+		out = append(out, m)
+	}
+	return out, true
+}
+
+// migrateRawJSONForV2Ray runs the 1.4→1.5 migrator on the RAW body before
+// ray2sing looks at it, and reports whether the body changed. The resulting
+// warnings go to the same parse-warning channel as every other migration.
+//
+// Reachability, stated plainly: ray2sing does NOT decode raw sing-box JSON — it
+// splits the body into share links and runs a protocol parser per link
+// (GenerateConfigLite), so a JSON document reaches it as "Not supported config
+// type" / "No outbounds found". Every JSON body is therefore already consumed by
+// the JSON branch of parseConfigContent, and this pass cannot fire from there
+// today. It exists so the ordering invariant holds by construction — nothing,
+// converter or engine, may see a 1.4 key — rather than by luck of branch order,
+// and it is exercised directly by TestMigrateRawJSONForV2Ray. A body that is not
+// a JSON object (share link, base64 blob, array) is left byte-identical.
+func migrateRawJSONForV2Ray(ctx context.Context, content []byte) ([]byte, bool) {
+	var root map[string]interface{}
+	decoder := json.NewDecoder(SJ.NewCommentFilter(bytes.NewReader(content)))
+	if err := decoder.Decode(&root); err != nil || root == nil {
+		return content, false
+	}
+	warnings := MigrateLegacyJSON(root)
+	if len(warnings) == 0 {
+		return content, false
+	}
+	raw, err := json.Marshal(root)
+	if err != nil {
+		return content, false
+	}
+	warns := parseWarningsFrom(ctx)
+	for _, w := range warnings {
+		fmt.Printf("[SingboxParser] v2ray migrate 1.4→1.5 (raw): %s\n", w)
+		warns.addMigration(w)
+	}
+	return raw, true
 }
 
 // migrateOptionsJSON round-trips an already-converted option.Options through the

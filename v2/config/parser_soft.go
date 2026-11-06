@@ -38,6 +38,15 @@ func filterValidLeavesJSON(ctx context.Context, content []byte, filterInbounds b
 		}
 	}
 
+	// The dns block is decoded as part of option.Options, so a single legacy
+	// server entry or a dns.fakeip object failed the WHOLE import — there is no
+	// per-leaf decode error to catch. Isolate it the same way the leaves below
+	// are isolated: migrate what maps cleanly (above), drop the entries that
+	// still cannot decode, and only drop the block itself when it is unusable.
+	if isolateDNSBlock(ctx, root) {
+		changed = true
+	}
+
 	inOut, _ := root["outbounds"].([]interface{})
 	inEp, _ := root["endpoints"].([]interface{})
 	// Tags owned by any emitted leaf, group, endpoint or inbound. The engine
@@ -263,6 +272,11 @@ func filterOutboundLeaves(ctx context.Context, items []interface{}, index *tagIn
 	// one repeated node costs a warning instead of the entire profile.
 	seenTags := make(map[string]bool)
 
+	// Leaves are collected first and then validated in ONE engine instance (see
+	// checkOutboundLeaves): a 300-node subscription used to pay 300 box.New
+	// calls. The results are replayed in document order below, so every drop
+	// warning keeps the position and wording it had with the per-leaf check.
+	pending := make([]outboundLeafCheck, 0, len(items))
 	for _, item := range items {
 		m, ok := item.(map[string]interface{})
 		if !ok {
@@ -276,30 +290,68 @@ func filterOutboundLeaves(ctx context.Context, items []interface{}, index *tagIn
 			groups = append(groups, item)
 			continue
 		}
-		tag := leafTag(m)
-		if tag != "" && seenTags[tag] {
-			fmt.Printf("[SingboxParser] skip duplicate outbound tag %q type=%q\n", tag, typ)
-			warns.addDrop("outbound", typ, tag, "duplicate tag")
-			continue
-		}
+		leaf := outboundLeafCheck{item: item, typ: typ, tag: leafTag(m)}
+		// Pre-checks are order-independent, so they run here and stay out of the
+		// batch. Same precedence as the single-pass version: registration, then
+		// the synthesized-group collision, then the legend rules inside
+		// checkOutboundLeaf. Duplicates cannot be decided here — a tag only
+		// counts as taken once an earlier leaf was ACCEPTED — so they stay in the
+		// replay below, where the accepted set is known.
 		if !outboundTypeRegistered(typ) {
-			fmt.Printf("[SingboxParser] skip unknown outbound type %q tag=%q\n", typ, tag)
-			warns.addDrop("outbound", typ, tag, fmt.Sprintf("unknown type %q", typ))
+			leaf.preKind = leafPreUnknownType
+			leaf.pre = fmt.Sprintf("unknown type %q", typ)
+		} else if reason, collides := index.autoGroupCollision(m); collides {
+			leaf.preKind = leafPreCollision
+			leaf.pre = reason
+		} else if ok, reason := checkPathologyLegends(m); !ok {
+			leaf.preKind = leafPreLegend
+			leaf.pre = reason.Error()
+		}
+		pending = append(pending, leaf)
+	}
+
+	// One engine instance for every candidate that still needs a verdict.
+	candidates := make([]map[string]interface{}, 0, len(pending))
+	candidateIndex := make([]int, 0, len(pending))
+	for i, leaf := range pending {
+		if leaf.pre != "" {
 			continue
 		}
-		if reason, collides := index.autoGroupCollision(m); collides {
-			fmt.Printf("[SingboxParser] skip outbound type=%q tag=%q: %s\n", typ, tag, reason)
-			warns.addDrop("outbound", typ, tag, reason)
+		candidates = append(candidates, leaf.item.(map[string]interface{}))
+		candidateIndex = append(candidateIndex, i)
+	}
+	for k, verdict := range checkOutboundLeaves(ctx, candidates) {
+		pending[candidateIndex[k]].verdict = verdict
+	}
+
+	for _, leaf := range pending {
+		if leaf.tag != "" && seenTags[leaf.tag] {
+			fmt.Printf("[SingboxParser] skip duplicate outbound tag %q type=%q\n", leaf.tag, leaf.typ)
+			warns.addDrop("outbound", leaf.typ, leaf.tag, "duplicate tag")
 			continue
 		}
-		if ok, reason := checkOutboundLeaf(ctx, m); ok {
-			leaves = append(leaves, item)
-			if tag != "" {
-				seenTags[tag] = true
-			}
-		} else {
-			fmt.Printf("[SingboxParser] skip invalid outbound type=%q tag=%q: %v\n", typ, tag, reason)
-			warns.addDrop("outbound", typ, tag, reason)
+		switch leaf.preKind {
+		case leafPreUnknownType:
+			fmt.Printf("[SingboxParser] skip unknown outbound type %q tag=%q\n", leaf.typ, leaf.tag)
+			warns.addDrop("outbound", leaf.typ, leaf.tag, leaf.pre)
+			continue
+		case leafPreCollision:
+			fmt.Printf("[SingboxParser] skip outbound type=%q tag=%q: %s\n", leaf.typ, leaf.tag, leaf.pre)
+			warns.addDrop("outbound", leaf.typ, leaf.tag, leaf.pre)
+			continue
+		case leafPreLegend:
+			fmt.Printf("[SingboxParser] skip invalid outbound type=%q tag=%q: %v\n", leaf.typ, leaf.tag, leaf.pre)
+			warns.addDrop("outbound", leaf.typ, leaf.tag, leaf.pre)
+			continue
+		}
+		if !leaf.verdict.ok {
+			fmt.Printf("[SingboxParser] skip invalid outbound type=%q tag=%q: %v\n", leaf.typ, leaf.tag, leaf.verdict.reason)
+			warns.addDrop("outbound", leaf.typ, leaf.tag, leaf.verdict.reason)
+			continue
+		}
+		leaves = append(leaves, leaf.item)
+		if leaf.tag != "" {
+			seenTags[leaf.tag] = true
 		}
 	}
 
@@ -307,10 +359,17 @@ func filterOutboundLeaves(ctx context.Context, items []interface{}, index *tagIn
 		return leaves
 	}
 
-	// Validate selector/urltest/balancer against the kept leaf set.
-	pool := append([]interface{}{}, leaves...)
+	// Validate selector/urltest/balancer against the kept leaf set. pool is
+	// built once and grown as groups are accepted; the accepted-tag set is
+	// updated incrementally instead of being rebuilt from the whole pool after
+	// every accepted group (that was O(groups x nodes)).
+	pool := make([]interface{}, 0, len(leaves)+1+len(groups))
+	pool = append(pool, leaves...)
 	pool = append(pool, stubDirectOutbound())
 	tagSet := leafTagSet(pool)
+	// scratch is reused by every group check so the pool is not re-copied into a
+	// fresh slice per group.
+	scratch := make([]interface{}, 0, len(pool)+2)
 
 	for _, item := range groups {
 		m, ok := item.(map[string]interface{})
@@ -323,10 +382,12 @@ func filterOutboundLeaves(ctx context.Context, items []interface{}, index *tagIn
 			warns.addDrop("group", typ, leafTag(m), fmt.Sprintf("unknown group type %q", typ))
 			continue
 		}
-		if ok, reason := checkOutboundGroup(ctx, m, pool, tagSet); ok {
+		if ok, reason := checkOutboundGroup(ctx, m, pool, tagSet, &scratch); ok {
 			leaves = append(leaves, item)
 			pool = append(pool, item)
-			tagSet = leafTagSet(pool)
+			if tag := leafTag(m); tag != "" {
+				tagSet[tag] = true
+			}
 		} else {
 			fmt.Printf("[SingboxParser] skip invalid outbound group type=%q tag=%q: %v\n", typ, leafTag(m), reason)
 			warns.addDrop("group", typ, leafTag(m), reason)
@@ -336,12 +397,55 @@ func filterOutboundLeaves(ctx context.Context, items []interface{}, index *tagIn
 	return leaves
 }
 
+// outboundLeafCheck is one outbound leaf waiting for (or holding) its verdict.
+type outboundLeafCheck struct {
+	item interface{}
+	typ  string
+	tag  string
+	// pre is a drop reason decided without the engine; "" means the leaf is
+	// still a validation candidate. preKind keeps each reason on the log line it
+	// used before the batch existed (the drop text the UI sees is pre either way).
+	pre     string
+	preKind leafPreKind
+	verdict leafVerdict
+}
+
+// leafPreKind says which pre-check rejected a leaf, purely so the stdout
+// log line stays worded exactly as the single-leaf path worded it.
+type leafPreKind uint8
+
+const (
+	leafPreNone leafPreKind = iota
+	leafPreUnknownType
+	leafPreCollision
+	leafPreLegend
+)
+
+// leafVerdict is the engine's verdict on one candidate leaf.
+type leafVerdict struct {
+	ok     bool
+	reason error
+}
+
 func filterEndpointLeaves(ctx context.Context, items []interface{}, index *tagIndex) []interface{} {
 	out := make([]interface{}, 0, len(items))
 	warns := parseWarningsFrom(ctx)
 	// Same duplicate-tag guard as the outbound filter: endpoints share the tag
 	// namespace with outbounds, so a repeated tag is fatal downstream.
 	seenTags := make(map[string]bool)
+	// Same two-pass shape as filterOutboundLeaves: validate every candidate in
+	// one engine instance, then replay in document order so warnings keep their
+	// position. A duplicate can only be judged once the accepted set is known.
+	type endpointLeafCheck struct {
+		item interface{}
+		typ  string
+		tag  string
+		// preUnknownType marks an endpoint type this build cannot construct;
+		// everything else goes to the batch.
+		preUnknownType bool
+		verdict        leafVerdict
+	}
+	pending := make([]endpointLeafCheck, 0, len(items))
 	for _, item := range items {
 		m, ok := item.(map[string]interface{})
 		if !ok {
@@ -351,26 +455,44 @@ func filterEndpointLeaves(ctx context.Context, items []interface{}, index *tagIn
 		if typ == "" {
 			continue
 		}
-		tag := leafTag(m)
-		duplicate := seenTags[tag] || (tag != "" && index.shared[tag])
-		if duplicate && tag != "" {
-			fmt.Printf("[SingboxParser] skip duplicate endpoint tag %q type=%q\n", tag, typ)
-			warns.addDrop("endpoint", typ, tag, "duplicate tag")
-			continue
-		}
+		leaf := endpointLeafCheck{item: item, typ: typ, tag: leafTag(m)}
 		if !endpointTypeRegistered(typ) {
-			fmt.Printf("[SingboxParser] skip unknown endpoint type %q tag=%q\n", typ, tag)
-			warns.addDrop("endpoint", typ, tag, fmt.Sprintf("unknown type %q", typ))
+			leaf.preUnknownType = true
+		}
+		pending = append(pending, leaf)
+	}
+	candidates := make([]map[string]interface{}, 0, len(pending))
+	candidateIndex := make([]int, 0, len(pending))
+	for i, leaf := range pending {
+		if leaf.preUnknownType {
 			continue
 		}
-		if ok, reason := checkEndpointLeaf(ctx, m); ok {
-			out = append(out, item)
-			if tag != "" {
-				seenTags[tag] = true
-			}
-		} else {
-			fmt.Printf("[SingboxParser] skip invalid endpoint type=%q tag=%q: %v\n", typ, tag, reason)
-			warns.addDrop("endpoint", typ, tag, reason)
+		candidates = append(candidates, leaf.item.(map[string]interface{}))
+		candidateIndex = append(candidateIndex, i)
+	}
+	for k, verdict := range checkEndpointLeaves(ctx, candidates) {
+		pending[candidateIndex[k]].verdict = verdict
+	}
+	for _, leaf := range pending {
+		duplicate := seenTags[leaf.tag] || (leaf.tag != "" && index.shared[leaf.tag])
+		if duplicate && leaf.tag != "" {
+			fmt.Printf("[SingboxParser] skip duplicate endpoint tag %q type=%q\n", leaf.tag, leaf.typ)
+			warns.addDrop("endpoint", leaf.typ, leaf.tag, "duplicate tag")
+			continue
+		}
+		if leaf.preUnknownType {
+			fmt.Printf("[SingboxParser] skip unknown endpoint type %q tag=%q\n", leaf.typ, leaf.tag)
+			warns.addDrop("endpoint", leaf.typ, leaf.tag, fmt.Sprintf("unknown type %q", leaf.typ))
+			continue
+		}
+		if !leaf.verdict.ok {
+			fmt.Printf("[SingboxParser] skip invalid endpoint type=%q tag=%q: %v\n", leaf.typ, leaf.tag, leaf.verdict.reason)
+			warns.addDrop("endpoint", leaf.typ, leaf.tag, leaf.verdict.reason)
+			continue
+		}
+		out = append(out, leaf.item)
+		if leaf.tag != "" {
+			seenTags[leaf.tag] = true
 		}
 	}
 	return out
@@ -422,19 +544,49 @@ func filterInboundLeaves(ctx context.Context, items []interface{}) []interface{}
 	return out
 }
 
-func checkOutboundLeaf(ctx context.Context, leaf map[string]interface{}) (bool, error) {
-	if ok, reason := checkPathologyLegends(leaf); !ok {
-		return false, reason
-	}
+// checkOutboundLeaves validates a whole subscription's leaves in ONE engine
+// instance instead of one box.New per leaf, and attributes a failure back to the
+// individual leaf that caused it.
+//
+// A passing range accepts every member. A failing range is split in half and
+// re-checked until the culprit stands alone, where the config is byte-for-byte
+// the one the old per-leaf check built — so the reported error (and therefore
+// the drop reason the UI shows) is unchanged. Cost is one box.New for a healthy
+// subscription plus O(failed x log n) for the rare broken one, instead of n.
+// See bisectLeafVerdicts for the loop.
+//
+// Per-leaf checks that the engine cannot express (pathology legend rules) and
+// the ones that do not need it (registration, collisions) run in
+// filterOutboundLeaves before this, exactly where they ran before.
+func checkOutboundLeaves(ctx context.Context, leaves []map[string]interface{}) []leafVerdict {
+	return bisectLeafVerdicts(len(leaves), func(lo, hi int) (bool, error) {
+		return checkOutboundLeafRange(ctx, leaves[lo:hi])
+	})
+}
+
+// checkOutboundLeafRange builds the stub document for one range of candidates.
+//
+// The stub's name follows the old single-leaf rule: a range that contains a leaf
+// already tagged "direct" names the stub "__soft_parse_direct__" so the engine
+// does not reject the config as a duplicate tag. A range of one therefore
+// reproduces the exact document the old checkOutboundLeaf built.
+func checkOutboundLeafRange(ctx context.Context, leaves []map[string]interface{}) (bool, error) {
 	stub := stubDirectOutbound()
 	routeFinal := stubTag
-	// Avoid duplicate tag when the leaf itself is already tagged "direct".
-	if leafTag(leaf) == stubTag {
-		stub = map[string]interface{}{"type": "direct", "tag": stubTagAlt}
-		routeFinal = stubTagAlt
+	for _, leaf := range leaves {
+		if leafTag(leaf) == stubTag {
+			stub = map[string]interface{}{"type": "direct", "tag": stubTagAlt}
+			routeFinal = stubTagAlt
+			break
+		}
 	}
+	out := make([]interface{}, 0, len(leaves)+1)
+	for _, leaf := range leaves {
+		out = append(out, leaf)
+	}
+	out = append(out, stub)
 	cfg := map[string]interface{}{
-		"outbounds": []interface{}{leaf, stub},
+		"outbounds": out,
 		"route":     map[string]interface{}{"final": routeFinal},
 	}
 	return checkConfigMap(ctx, cfg)
@@ -505,7 +657,12 @@ func quoteTagList(ids []string) string {
 	return strings.Join(quoted, ", ")
 }
 
-func checkOutboundGroup(ctx context.Context, group map[string]interface{}, pool []interface{}, tagSet map[string]bool) (bool, error) {
+// checkOutboundGroup validates one group against the accepted pool. pool and
+// tagSet are owned by the caller: the pool is grown as groups are accepted and
+// the tag set is updated in place, so neither is rebuilt per group. scratch is
+// the caller's reusable buffer, so assembling the candidate list does not
+// allocate a fresh pool-sized slice for every group.
+func checkOutboundGroup(ctx context.Context, group map[string]interface{}, pool []interface{}, tagSet map[string]bool, scratch *[]interface{}) (bool, error) {
 	refs, unknown := groupMemberRefs(group, tagSet)
 	if len(refs) == 0 {
 		return false, fmt.Errorf("group declares no member outbounds")
@@ -513,11 +670,13 @@ func checkOutboundGroup(ctx context.Context, group map[string]interface{}, pool 
 	if len(unknown) > 0 {
 		return false, fmt.Errorf("group references unknown outbound tags: %s", quoteTagList(unknown))
 	}
-	out := append([]interface{}{}, pool...)
+	out := (*scratch)[:0]
+	out = append(out, pool...)
 	out = append(out, group)
 	if _, ok := tagSet[stubTag]; !ok {
 		out = append(out, stubDirectOutbound())
 	}
+	*scratch = out
 	cfg := map[string]interface{}{
 		"outbounds": out,
 		"route":     map[string]interface{}{"final": firstRoutableTag(out)},
@@ -525,9 +684,61 @@ func checkOutboundGroup(ctx context.Context, group map[string]interface{}, pool 
 	return checkConfigMap(ctx, cfg)
 }
 
-func checkEndpointLeaf(ctx context.Context, leaf map[string]interface{}) (bool, error) {
+// checkEndpointLeaves is checkEndpointLeaf for a whole subscription: one engine
+// instance for every endpoint, bisected on failure so the verdict and the error
+// text belong to the individual endpoint that failed.
+func checkEndpointLeaves(ctx context.Context, leaves []map[string]interface{}) []leafVerdict {
+	return bisectLeafVerdicts(len(leaves), func(lo, hi int) (bool, error) {
+		return checkEndpointLeafRange(ctx, leaves[lo:hi])
+	})
+}
+
+// bisectLeafVerdicts turns a set-level check into per-leaf verdicts.
+//
+// rangeOK reports whether the config built from leaves[lo:hi] passes. A passing
+// range accepts every member; a failing range is halved and re-checked until the
+// culprit stands alone. Singletons are therefore checked exactly the way the old
+// per-leaf loop checked them, which is what keeps the error text -- and so the
+// drop reason the UI shows -- identical.
+//
+// A healthy import costs exactly one call. A broken one costs O(failed x log n),
+// which only matters for a subscription that is mostly invalid.
+func bisectLeafVerdicts(n int, rangeOK func(lo, hi int) (bool, error)) []leafVerdict {
+	verdicts := make([]leafVerdict, n)
+	if n == 0 {
+		return verdicts
+	}
+	// Explicit stack, not recursion: a subscription can carry thousands of
+	// leaves and this must not depend on the goroutine stack growing.
+	ranges := make([][2]int, 0, 8)
+	ranges = append(ranges, [2]int{0, n})
+	for len(ranges) > 0 {
+		r := ranges[len(ranges)-1]
+		ranges = ranges[:len(ranges)-1]
+		ok, reason := rangeOK(r[0], r[1])
+		if ok {
+			for i := r[0]; i < r[1]; i++ {
+				verdicts[i] = leafVerdict{ok: true}
+			}
+			continue
+		}
+		if r[1]-r[0] == 1 {
+			verdicts[r[0]] = leafVerdict{ok: false, reason: reason}
+			continue
+		}
+		mid := r[0] + (r[1]-r[0])/2
+		ranges = append(ranges, [2]int{mid, r[1]}, [2]int{r[0], mid})
+	}
+	return verdicts
+}
+
+func checkEndpointLeafRange(ctx context.Context, leaves []map[string]interface{}) (bool, error) {
+	endpoints := make([]interface{}, 0, len(leaves))
+	for _, leaf := range leaves {
+		endpoints = append(endpoints, leaf)
+	}
 	cfg := map[string]interface{}{
-		"endpoints": []interface{}{leaf},
+		"endpoints": endpoints,
 		"outbounds": []interface{}{stubDirectOutbound()},
 		"route":     map[string]interface{}{"final": stubTag},
 	}
@@ -539,11 +750,14 @@ func checkEndpointLeaf(ctx context.Context, leaf map[string]interface{}) (bool, 
 	if err := opts.UnmarshalJSONContext(ctx, raw); err != nil {
 		return false, err
 	}
-	// User WG endpoints often fail full-config validation in isolation (no dial/runtime).
-	if leafType(leaf) == "wireguard" {
+	// User WG endpoints often fail full-config validation in isolation (no
+	// dial/runtime). A range of one keeps the old short-circuit; a range that
+	// also holds a broken endpoint fails here and is bisected, after which the
+	// wireguard endpoint is judged on its own again.
+	if len(leaves) == 1 && leafType(leaves[0]) == "wireguard" {
 		return true, nil
 	}
-	if err := libbox.CheckConfig(string(raw)); err != nil {
+	if err := softParseCheckJSON(raw); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -558,13 +772,22 @@ func checkInboundLeaf(ctx context.Context, leaf map[string]interface{}) (bool, e
 	return checkConfigMap(ctx, cfg)
 }
 
+// softParseCheckJSON is the one place the soft filter asks the engine to build a
+// config. It is a variable so tests can count how many instances an import
+// builds (the whole point of batching the leaf checks: one, not one per leaf).
+// Nothing in production assigns it.
+var softParseCheckJSON = func(raw []byte) error {
+	// libbox.CheckConfig builds its own base context (1.5 replacement for CheckConfigOptions).
+	return libbox.CheckConfig(string(raw))
+}
+
 func checkConfigMap(ctx context.Context, cfg map[string]interface{}) (bool, error) {
 	raw, err := json.Marshal(cfg)
 	if err != nil {
 		return false, err
 	}
-	_ = ctx // libbox.CheckConfig builds its own base context (1.5 replacement for CheckConfigOptions).
-	if err := libbox.CheckConfig(string(raw)); err != nil {
+	_ = ctx
+	if err := softParseCheckJSON(raw); err != nil {
 		return false, err
 	}
 	return true, nil

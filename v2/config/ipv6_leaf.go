@@ -1,7 +1,6 @@
 package config
 
 import (
-	"encoding/json"
 	"net"
 	"strings"
 
@@ -52,21 +51,45 @@ func dialerDetourIsIPv6Leaf(opts any) bool {
 	return IsIPv6LeafTag(w.TakeDialerOptions().Detour)
 }
 
-// outboundServerHost extracts a best-effort server/peer host from an outbound via JSON.
+// outboundServerHost extracts the dialed server host from an outbound.
+//
+// It used to marshal the value to JSON and unmarshal it into a map just to look
+// for a "server" key, once per leaf. For the values builder.go actually passes
+// that round-trip could NEVER succeed: option.Outbound keeps every protocol
+// field in Options (json:"-") and defines MarshalJSONContext, not MarshalJSON,
+// so encoding/json renders it as {"type":..,"tag":..} and there is no "server"
+// key to find. The function therefore always returned "".
+//
+// That made the server-host half of IsIPv6Leaf dead: only the "-ipv6" TAG
+// suffix ever filtered anything, so a node whose server is an IPv6 literal
+// survived into a build that cannot dial it. Reading the host through the
+// engine's own ServerOptionsWrapper fixes the filter without any marshalling —
+// every outbound options struct embeds ServerOptions, so the interface covers
+// them all and there is no type switch to keep in sync.
+//
+// A genuinely dynamic object still takes the map branch: decoded subscription
+// JSON has not been turned into typed options yet at that point.
 func outboundServerHost(out any) string {
-	raw, err := json.Marshal(out)
-	if err != nil {
+	switch typed := out.(type) {
+	case option.Outbound:
+		return outboundServerHost(typed.Options)
+	case map[string]interface{}:
+		return serverHostFromMap(typed)
+	case option.ServerOptionsWrapper:
+		return strings.TrimSpace(typed.TakeServerOptions().Server)
+	default:
 		return ""
 	}
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return ""
-	}
+}
+
+// serverHostFromMap reads "server" from a decoded subscription object, top-level
+// first and then under "options" (the shape option.Outbound would render if it
+// ever gained a flattening MarshalJSON).
+func serverHostFromMap(m map[string]interface{}) string {
 	if s, ok := m["server"].(string); ok {
 		return strings.TrimSpace(s)
 	}
-	opts, _ := m["options"].(map[string]any)
-	if opts != nil {
+	if opts, ok := m["options"].(map[string]interface{}); ok {
 		if s, ok := opts["server"].(string); ok {
 			return strings.TrimSpace(s)
 		}

@@ -765,8 +765,17 @@ func TestMigrateGeoDNSRule(t *testing.T) {
 	if want := strings.ReplaceAll(DefaultGeoSiteRuleSetURL, "{tag}", "cn"); rs["url"] != want {
 		t.Fatalf("url = %v, want %v", rs["url"], want)
 	}
-	if len(warnings) != 1 || !strings.Contains(warnings[0], "dns rule") {
-		t.Fatalf("want the dns rewrite reported, got %v", warnings)
+	// The geo rewrite must be REPORTED; the DNS migrator may add warnings of its
+	// own here (this rule names `local`, a server 1.4 resolved implicitly), so
+	// assert presence rather than an exact count.
+	foundGeo := false
+	for _, w := range warnings {
+		if strings.Contains(w, "dns rule") && strings.Contains(w, "geosite") {
+			foundGeo = true
+		}
+	}
+	if !foundGeo {
+		t.Fatalf("want the dns geosite rewrite reported, got %v", warnings)
 	}
 	if again := MigrateLegacyJSON(root); len(again) != 0 {
 		t.Fatalf("second run must be silent, got %v", again)
