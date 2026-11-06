@@ -11,10 +11,12 @@ import (
 //
 // The 1.5 engine hard-rejects several legacy keys (option.RemovedParrotKeys,
 // RemovedHyMbpsKeys, RemovedTrustTunnel*Keys, rule action "direct", vless
-// legacy vision flow names, pad_profile). A subscription carrying any of them
-// would fail to import at all. The migrator rewrites them to their 1.5
-// equivalents and reports what it changed; unknown content passes through
-// untouched. All transforms are idempotent (second run is a no-op).
+// legacy vision flow names, pad_profile, the geosite/geoip rule matchers, the
+// inbound sniff fields and the tun inet4_/inet6_ address fields). A
+// subscription carrying any of them would fail to import at all. The migrator
+// rewrites them to their 1.5 equivalents and reports what it changed; unknown
+// content passes through untouched. All transforms are idempotent (second run
+// is a no-op).
 
 // MigrateLegacyJSON rewrites legacy keys in a decoded config document
 // (outbounds/endpoints/inbounds + route rules + dns servers) in place and
@@ -35,6 +37,10 @@ func MigrateLegacyJSON(root map[string]interface{}) []string {
 				continue
 			}
 			switch leafType(m) {
+			case "tun":
+				if listKey == "inbounds" {
+					migrateTunLegacyAddresses(m, &warnings)
+				}
 			case "hysteria", "hysteria2":
 				migrateHysteriaBandwidth(m, &warnings)
 				migrateImplicitTLS(m, &warnings)
@@ -60,6 +66,8 @@ func MigrateLegacyJSON(root map[string]interface{}) []string {
 		}
 	}
 	migrateRouteDirectAction(root, &warnings)
+	migrateGeoRules(root, &warnings)
+	migrateLegacyInboundFields(root, &warnings)
 	return warnings
 }
 
@@ -129,7 +137,8 @@ func migrateParrotKeys(m map[string]interface{}, warnings *[]string) {
 
 // migrateHysteriaBandwidth: hy/hy2 up_mbps/down_mbps/up/down/brutal_debug/
 // ignore_client_bandwidth are hard-rejected in 1.5. A positive bandwidth cap
-// maps to congestion_control=brutal + brutal_mbps (max of up/down).
+// maps to congestion_control=brutal + brutal_mbps (the send rate: up, falling
+// back to down).
 func migrateHysteriaBandwidth(m map[string]interface{}, warnings *[]string) {
 	legacyKeys := []string{"up_mbps", "down_mbps", "up", "down", "brutal_debug", "ignore_client_bandwidth"}
 	present := false
@@ -155,8 +164,13 @@ func migrateHysteriaBandwidth(m map[string]interface{}, warnings *[]string) {
 // congestion_control is brutal (option.ValidateQUICCongestion), so an explicit
 // non-brutal CC wins and the legacy cap is dropped with a warning.
 func applyHysteriaBandwidthCap(m map[string]interface{}, up, down int, label string, warnings *[]string) {
+	// brutal_mbps is the fixed *send* rate (option.QUICOptions.BrutalMbps,
+	// option/http.go:43) and 1.4 up_mbps/up was the client's send cap, so the
+	// uplink is the axis to carry over. max(up, down) turned a 50/500 line into
+	// a 500 Mbps send rate on a 50 Mbps uplink. down is only a fallback for
+	// profiles that never declared an uplink cap.
 	capMbps := up
-	if down > capMbps {
+	if capMbps == 0 {
 		capMbps = down
 	}
 	cc, _ := m["congestion_control"].(string)
@@ -404,4 +418,417 @@ func migrateRuleListActionDirect(list interface{}, warnings *[]string) {
 			migrateRuleListActionDirect(nested, warnings)
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Legacy geo matchers: geosite / geoip / source_geoip
+// ---------------------------------------------------------------------------
+
+// These mirror constant.RuleSetTypeRemote / constant.RuleSetFormatBinary; the
+// migrator works on raw JSON shapes and stays free of engine imports.
+const (
+	geoKindGeoSite   = "geosite"
+	geoKindGeoIP     = "geoip"
+	ruleSetRemote    = "remote"
+	ruleSetBinFormat = "binary"
+)
+
+// migrateGeoRules rewrites the 1.4 geo matchers in route and dns rules into 1.5
+// rule_set references.
+//
+// The 1.5 engine hard-errors on geosite/geoip/source_geoip (route/rule/
+// rule_default.go:124-132 and route/rule/rule_dns.go:188-196: "geosite database
+// is deprecated in sing-box 1.8.0 and removed in sing-box 1.12.0"). Rules are
+// built inside router.Initialize, which box.New calls, so one legacy key fails
+// the entire import; filterValidLeavesJSON has no per-rule drop path (it
+// isolates outbounds/endpoints/inbounds only). The keys have to go here.
+//
+// geosite: ["cn","ads"] → the rule keeps its other conditions and gains
+// rule_set ["geosite-cn","geosite-ads"]; each tag is backed by a synthesized
+// remote rule-set in route.rule_set, built from the same URL template the
+// routing-profile compiler uses (DefaultGeoSiteRuleSetURL). geoip: → geoip-<code>
+// with DefaultGeoIPRuleSetURL. Existing rule_set entries are preserved and stay
+// first.
+//
+// source_geoip: the geoip rule-sets cannot just be added — a rule_set matcher
+// compares the *destination*, and the engine's only source-side switch
+// (rule_set_ip_cidr_match_source) is rule-wide, so it would also turn a
+// destination geoip/geosite entry of the same rule into a source match. Rather
+// than change what the rule matches, source_geoip is dropped and the lost
+// source scoping is reported: one legacy key must never fail the whole import.
+func migrateGeoRules(root map[string]interface{}, warnings *[]string) {
+	if route, ok := root["route"].(map[string]interface{}); ok {
+		migrateRuleListGeo(route, "rules", root, "route rule", warnings)
+	}
+	// DNS rules declare the same rule_set field (option.RawDefaultDNSRule) and
+	// resolve it through the same route router — route.Router.Initialize runs
+	// before dns.Router.Initialize in box.New, so the tags already exist when
+	// the DNS router builds its rules. The rewrite is therefore identical.
+	if dns, ok := root["dns"].(map[string]interface{}); ok {
+		migrateRuleListGeo(dns, "rules", root, "dns rule", warnings)
+	}
+}
+
+// migrateRuleListGeo rewrites geo matchers in parent[key] and recurses into
+// logical rules, whose children live under "rules": a geosite nested in a
+// logical rule fails box.New just the same.
+func migrateRuleListGeo(parent map[string]interface{}, key string, root map[string]interface{}, label string, warnings *[]string) {
+	rules, ok := parent[key].([]interface{})
+	if !ok {
+		return
+	}
+	kept := make([]interface{}, 0, len(rules))
+	dropped := false
+	for _, item := range rules {
+		rule, isRule := item.(map[string]interface{})
+		if !isRule {
+			kept = append(kept, item)
+			continue
+		}
+		hadGeo := migrateRuleGeo(rule, root, label, warnings)
+		if _, isList := rule["rules"].([]interface{}); isList {
+			migrateRuleListGeo(rule, "rules", root, label, warnings)
+		}
+		// A rule whose only matcher was a dropped geo key would reach the
+		// engine as "missing conditions" and fail the whole import. Dropping
+		// the rule keeps the invariant (a legacy key never costs the import):
+		// the traffic it used to match simply falls through to the rules after
+		// it. Rules that arrived without matchers are left alone — they were
+		// invalid in 1.4 too and stay the engine's business.
+		if hadGeo && !ruleHasCondition(rule) {
+			*warnings = append(*warnings, fmt.Sprintf("%s: rule dropped — its only matchers were legacy geo keys and a conditionless rule would fail the import", label))
+			dropped = true
+			continue
+		}
+		kept = append(kept, item)
+	}
+	if dropped {
+		parent[key] = kept
+	}
+}
+
+// migrateRuleGeo rewrites one rule map in place, reports what it changed and
+// says whether the rule carried any geo key at all.
+func migrateRuleGeo(rule map[string]interface{}, root map[string]interface{}, label string, warnings *[]string) bool {
+	hadGeo := false
+	var tags []string
+	for _, kind := range []string{geoKindGeoSite, geoKindGeoIP} {
+		raw, ok := rule[kind]
+		if !ok {
+			continue
+		}
+		hadGeo = true
+		delete(rule, kind)
+		codes := stringList(raw)
+		if len(codes) == 0 {
+			*warnings = append(*warnings, fmt.Sprintf("%s: empty %s dropped", label, kind))
+			continue
+		}
+		for _, code := range codes {
+			code = strings.ToLower(strings.TrimSpace(code))
+			if code == "" {
+				continue
+			}
+			tag := ensureGeoRuleSet(root, kind, code)
+			tags = append(tags, tag)
+			*warnings = append(*warnings, fmt.Sprintf("%s: %s %q → rule_set %q", label, kind, code, tag))
+		}
+	}
+	if raw, ok := rule["source_geoip"]; ok {
+		hadGeo = true
+		delete(rule, "source_geoip")
+		*warnings = append(*warnings, fmt.Sprintf("%s: source_geoip [%s] dropped — source-side geoip matching is not carried over (the geoip database was removed in 1.5; a rule_set matcher compares the destination)", label, strings.Join(stringList(raw), ", ")))
+	}
+	appendRuleSetRefs(rule, tags)
+	return hadGeo
+}
+
+// isRuleNonMatcherKey reports whether a rule key carries no match condition:
+// the rule kind and its action. A rule whose keys are all such keys matches
+// nothing on its own, and the 1.5 engine rejects it with "missing conditions".
+// Anything unknown counts as a condition (the safe direction: such a rule is
+// left for the engine to judge instead of being thrown away here).
+func isRuleNonMatcherKey(key string) bool {
+	switch key {
+	case "type", "mode", "invert", "rules",
+		"action", "outbound", "server", "strategy",
+		"method", "no_drop", "sniffer", "timeout",
+		"override_address", "override_port",
+		"disable_cache", "disable_optimistic_cache", "rewrite_ttl", "client_subnet",
+		"rcode", "answer", "ns", "extra":
+		return true
+	}
+	return false
+}
+
+// ruleHasCondition reports whether a rule still carries a matcher. A logical
+// rule is matched by its children, so an empty children list is not a
+// condition (and "and" over nothing matches everything).
+func ruleHasCondition(rule map[string]interface{}) bool {
+	if leafType(rule) == "logical" {
+		children, _ := rule["rules"].([]interface{})
+		return len(children) > 0
+	}
+	for key := range rule {
+		if !isRuleNonMatcherKey(key) {
+			return true
+		}
+	}
+	return false
+}
+
+// ensureGeoRuleSet returns the rule-set tag for a geo code and makes sure
+// route.rule_set declares it. The tag already being declared (by us on a
+// previous rule, or by the subscription itself) is a no-op: the engine rejects
+// a duplicate rule-set tag.
+func ensureGeoRuleSet(root map[string]interface{}, kind, code string) string {
+	tag := kind + "-" + code
+	route, ok := root["route"].(map[string]interface{})
+	if !ok {
+		// A missing (or null) route is normal. A non-object route is already
+		// invalid and cannot carry rule_set, so a fresh object is the only way
+		// to keep the synthesized reference resolvable.
+		route = map[string]interface{}{}
+		root["route"] = route
+	}
+	sets, _ := route["rule_set"].([]interface{})
+	for _, item := range sets {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		for _, existing := range stringList(m["tag"]) {
+			if strings.TrimSpace(existing) == tag {
+				return tag
+			}
+		}
+	}
+	url := DefaultGeoSiteRuleSetURL
+	if kind == geoKindGeoIP {
+		url = DefaultGeoIPRuleSetURL
+	}
+	route["rule_set"] = append(sets, map[string]interface{}{
+		"type":   ruleSetRemote,
+		"tag":    tag,
+		"format": ruleSetBinFormat,
+		"url":    strings.ReplaceAll(url, "{tag}", code),
+	})
+	return tag
+}
+
+// appendRuleSetRefs adds tags to a rule's rule_set list, keeping the existing
+// entries first and skipping tags that are already there.
+func appendRuleSetRefs(rule map[string]interface{}, tags []string) {
+	if len(tags) == 0 {
+		return
+	}
+	var existing []interface{}
+	switch raw := rule["rule_set"].(type) {
+	case []interface{}:
+		existing = append(existing, raw...)
+	case string:
+		existing = append(existing, raw)
+	}
+	seen := make(map[string]bool, len(existing)+len(tags))
+	for _, item := range existing {
+		if s, ok := item.(string); ok {
+			seen[strings.TrimSpace(s)] = true
+		}
+	}
+	changed := false
+	for _, tag := range tags {
+		if seen[tag] {
+			continue
+		}
+		seen[tag] = true
+		existing = append(existing, tag)
+		changed = true
+	}
+	if changed {
+		rule["rule_set"] = existing
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Legacy inbound fields: sniff / domain_strategy / tun addresses
+// ---------------------------------------------------------------------------
+
+// legacyInboundDropKeys are the 1.4 inbound fields the 1.5 engine rejects.
+// option.InboundOptions is embedded in every inbound's listen options and
+// option.Inbound.UnmarshalJSON rejects any non-zero instance ("legacy inbound
+// fields are deprecated in sing-box 1.11.0 and removed in sing-box 1.13.0"), so
+// a single one of them makes the whole document unparsable — on the import path
+// the leaf is dropped, on Start the profile fails outright.
+var legacyInboundDropKeys = []string{
+	"sniff_override_destination",
+	"sniff_timeout",
+	"domain_strategy",
+	"udp_disable_domain_unmapping",
+}
+
+// migrateLegacyInboundFields strips the deprecated inbound fields and lifts
+// sniff: true into a route rule action.
+//
+// 1.4 sniffed per inbound; 1.5 only sniffs where a rule asks for it
+// (docs/migration.md, "Migrate legacy inbound fields to rule actions"). One
+// match-all {"action":"sniff"} rule is emitted for the document: the action
+// does not terminate matching, so a single rule reproduces per-inbound sniffing.
+// It goes to the top of route.rules — appended after the route/reject rules it
+// would never run, because the first matching route rule already sent the
+// connection on its way.
+func migrateLegacyInboundFields(root map[string]interface{}, warnings *[]string) {
+	list, _ := root["inbounds"].([]interface{})
+	needSniff := false
+	for _, item := range list {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		label := fmt.Sprintf("%s %q", leafType(m), leafTag(m))
+		if v, ok := m["sniff"]; ok {
+			delete(m, "sniff")
+			if enabled, _ := v.(bool); enabled {
+				needSniff = true
+			}
+		}
+		for _, key := range legacyInboundDropKeys {
+			if _, ok := m[key]; !ok {
+				continue
+			}
+			delete(m, key)
+			*warnings = append(*warnings, fmt.Sprintf("%s: legacy %s dropped (1.5 rejects inbound sniff options; use a route rule action instead)", label, key))
+		}
+	}
+	if needSniff {
+		// Reported either way: a document that already sniffed through a rule
+		// needs no new one, but the user should still learn that the inbound
+		// switch was folded into it.
+		if ensureSniffRouteRule(root) {
+			*warnings = append(*warnings, "inbound sniff: true migrated to an action=sniff route rule at the top of route.rules")
+		} else {
+			*warnings = append(*warnings, "inbound sniff: true dropped (the document already has an action=sniff route rule)")
+		}
+	}
+}
+
+// ensureSniffRouteRule prepends the sniff action unless the document already
+// carries one (the idempotency guard: a second migrator pass must not add a
+// second copy). Reports whether a rule was added.
+func ensureSniffRouteRule(root map[string]interface{}) bool {
+	route, ok := root["route"].(map[string]interface{})
+	if !ok {
+		route = map[string]interface{}{}
+		root["route"] = route
+	}
+	rules, _ := route["rules"].([]interface{})
+	for _, item := range rules {
+		rule, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if action, _ := rule["action"].(string); strings.TrimSpace(action) == "sniff" {
+			return false
+		}
+	}
+	route["rules"] = append([]interface{}{map[string]interface{}{"action": "sniff"}}, rules...)
+	return true
+}
+
+// migrateTunLegacyAddresses merges the 1.4 tun address fields into the 1.5
+// shape. protocol/tun/inbound.go rejects inet4_address/inet6_address and the
+// four route_* variants outright ("legacy tun address fields are deprecated in
+// sing-box 1.10.0 and removed in sing-box 1.12.0") and `gso` on its own line,
+// so a 1.4 tun inbound cannot be built at all: on the import path the soft
+// filter drops the inbound, taking the whole tunnel with it.
+func migrateTunLegacyAddresses(m map[string]interface{}, warnings *[]string) {
+	label := fmt.Sprintf("tun %q", leafTag(m))
+	mergeTunAddressList(m, label, "address", "inet4_address", "inet6_address", warnings)
+	mergeTunAddressList(m, label, "route_address", "inet4_route_address", "inet6_route_address", warnings)
+	mergeTunAddressList(m, label, "route_exclude_address", "inet4_route_exclude_address", "inet6_route_exclude_address", warnings)
+	if v, ok := m["gso"]; ok {
+		delete(m, "gso")
+		if enabled, _ := v.(bool); enabled {
+			*warnings = append(*warnings, label+": gso dropped (removed in 1.5; the optimized path is always used)")
+		}
+	}
+}
+
+// mergeTunAddressList folds the legacy inet4_*/inet6_* pair into their 1.5
+// list: existing entries first, then v4, then v6, exact duplicates skipped. The
+// source keys are deleted even when they were the only entries, so a second
+// pass finds nothing to merge.
+func mergeTunAddressList(m map[string]interface{}, label, dst, v4, v6 string, warnings *[]string) {
+	raw4, has4 := m[v4]
+	raw6, has6 := m[v6]
+	if !has4 && !has6 {
+		return
+	}
+	delete(m, v4)
+	delete(m, v6)
+	merged := make([]interface{}, 0, 4)
+	seen := make(map[string]bool)
+	for _, item := range listValue(m[dst]) {
+		key := fmt.Sprint(item)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		merged = append(merged, item)
+	}
+	for _, raw := range []interface{}{raw4, raw6} {
+		for _, entry := range stringList(raw) {
+			entry = strings.TrimSpace(entry)
+			if entry == "" || seen[entry] {
+				continue
+			}
+			seen[entry] = true
+			merged = append(merged, entry)
+		}
+	}
+	if len(merged) > 0 {
+		m[dst] = merged
+	}
+	var keys []string
+	if has4 {
+		keys = append(keys, v4)
+	}
+	if has6 {
+		keys = append(keys, v6)
+	}
+	*warnings = append(*warnings, fmt.Sprintf("%s: %s merged into %s", label, strings.Join(keys, " + "), dst))
+}
+
+// listValue reads a decoded JSON list, unwrapping the bare-string shape.
+func listValue(value interface{}) []interface{} {
+	switch typed := value.(type) {
+	case []interface{}:
+		return typed
+	case string:
+		if typed == "" {
+			return nil
+		}
+		return []interface{}{typed}
+	}
+	return nil
+}
+
+// stringList returns the string entries of a decoded JSON list. sing-box
+// accepts a bare string wherever it accepts a list, so that shape is unwrapped
+// too; anything else yields nil.
+func stringList(value interface{}) []string {
+	switch typed := value.(type) {
+	case string:
+		return []string{typed}
+	case []string:
+		return typed
+	case []interface{}:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
 }

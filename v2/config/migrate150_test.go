@@ -69,8 +69,10 @@ func TestMigrateHysteriaBandwidth(t *testing.T) {
 	if a["congestion_control"] != "brutal" {
 		t.Fatalf("want brutal, got %v", a["congestion_control"])
 	}
-	if a["brutal_mbps"] != 200 {
-		t.Fatalf("want max(up,down)=200, got %v", a["brutal_mbps"])
+	// brutal_mbps is the fixed send rate, so the uplink (up_mbps) is the axis;
+	// max(up, down) would have put a 200 Mbps send rate on a 100 Mbps uplink.
+	if a["brutal_mbps"] != 100 {
+		t.Fatalf("want send-rate cap up=100, got %v", a["brutal_mbps"])
 	}
 	for _, k := range []string{"up_mbps", "down_mbps", "brutal_debug"} {
 		if _, ok := a[k]; ok {
@@ -78,8 +80,10 @@ func TestMigrateHysteriaBandwidth(t *testing.T) {
 		}
 	}
 	b := list[1].(map[string]interface{})
-	if b["brutal_mbps"] != 100 {
-		t.Fatalf("string Mbps parse: want 100, got %v", b["brutal_mbps"])
+	// Same axis for the string form: up="50 Mbps" is the send cap, so the
+	// 100 Mbps downlink must not win.
+	if b["brutal_mbps"] != 50 {
+		t.Fatalf("string Mbps parse: want send-rate cap up=50, got %v", b["brutal_mbps"])
 	}
 	if _, ok := b["ignore_client_bandwidth"]; ok {
 		t.Fatal("ignore_client_bandwidth not removed")
@@ -227,7 +231,8 @@ func TestMigrateThenSoftFilterKeepsLegacyLeaf(t *testing.T) {
 		t.Fatalf("both migrated leaves must survive, got %d: %s", len(list), filtered)
 	}
 	hy2 := list[1].(map[string]interface{})
-	if hy2["brutal_mbps"] != float64(100) || hy2["congestion_control"] != "brutal" {
+	// up_mbps=50 is the client's send cap; the 100 Mbps downlink is not.
+	if hy2["brutal_mbps"] != float64(50) || hy2["congestion_control"] != "brutal" {
 		t.Fatalf("hy2 not migrated: %v", hy2)
 	}
 }
@@ -441,5 +446,522 @@ func TestBandwidthMbpsParsing(t *testing.T) {
 		if got := bandwidthMbps(c.in...); got != c.want {
 			t.Fatalf("bandwidthMbps(%v)=%d, want %d", c.in, got, c.want)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Defect 1: geosite / geoip / source_geoip
+// ---------------------------------------------------------------------------
+
+// jsonStrings renders a decoded JSON string-or-array as []string, failing the
+// test on any other shape (a rule_set list must be strings).
+func jsonStrings(t *testing.T, value interface{}) []string {
+	t.Helper()
+	switch typed := value.(type) {
+	case nil:
+		return nil
+	case string:
+		return []string{typed}
+	case []interface{}:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			s, ok := item.(string)
+			if !ok {
+				t.Fatalf("want string entries, got %v", value)
+			}
+			out = append(out, s)
+		}
+		return out
+	}
+	t.Fatalf("want string or array, got %T (%v)", value, value)
+	return nil
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// routeRuleSets indexes route.rule_set by tag for assertions.
+func routeRuleSets(t *testing.T, root map[string]interface{}) map[string]map[string]interface{} {
+	t.Helper()
+	out := map[string]map[string]interface{}{}
+	route, _ := root["route"].(map[string]interface{})
+	if route == nil {
+		return out
+	}
+	sets, _ := route["rule_set"].([]interface{})
+	for _, item := range sets {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		for _, tag := range jsonStrings(t, m["tag"]) {
+			out[tag] = m
+		}
+	}
+	return out
+}
+
+func routeRules(t *testing.T, root map[string]interface{}) []interface{} {
+	t.Helper()
+	route, _ := root["route"].(map[string]interface{})
+	if route == nil {
+		t.Fatal("route missing")
+	}
+	rules, _ := route["rules"].([]interface{})
+	return rules
+}
+
+// A rule carrying geosite+geoip must not reach the 1.5 engine (it hard-errors
+// inside router.Initialize, which box.New calls, so the whole import dies).
+// Both are rewritten to rule_set references backed by synthesized remote sets,
+// and the existing entries of the rule's rule_set stay first.
+func TestMigrateGeoRuleMatchers(t *testing.T) {
+	root, warnings := migrateDoc(t, `{"route":{"rules":[
+		{"domain_suffix":[".example"],"outbound":"direct"},
+		{"geosite":["cn","ads"],"geoip":["cn"],"rule_set":["custom"],"outbound":"proxy"}
+	]}}`)
+	rules := routeRules(t, root)
+	if len(rules) != 2 {
+		t.Fatalf("rule count changed: %v", rules)
+	}
+	if _, ok := rules[0].(map[string]interface{})["rule_set"]; ok {
+		t.Fatalf("rule without geo matchers must stay untouched: %v", rules[0])
+	}
+	rule := rules[1].(map[string]interface{})
+	for _, key := range []string{"geosite", "geoip"} {
+		if _, ok := rule[key]; ok {
+			t.Fatalf("%s must be removed (1.5 hard-rejects it): %v", key, rule)
+		}
+	}
+	if got, want := jsonStrings(t, rule["rule_set"]), []string{"custom", "geosite-cn", "geosite-ads", "geoip-cn"}; !equalStrings(got, want) {
+		t.Fatalf("rule_set = %v, want %v (existing first, then appended)", got, want)
+	}
+	if rule["outbound"] != "proxy" {
+		t.Fatalf("other conditions must survive: %v", rule)
+	}
+
+	sets := routeRuleSets(t, root)
+	if len(sets) != 3 {
+		t.Fatalf("want 3 synthesized rule-sets, got %v", sets)
+	}
+	for _, tc := range []struct{ tag, tmpl, code string }{
+		{"geosite-cn", DefaultGeoSiteRuleSetURL, "cn"},
+		{"geosite-ads", DefaultGeoSiteRuleSetURL, "ads"},
+		{"geoip-cn", DefaultGeoIPRuleSetURL, "cn"},
+	} {
+		rs, ok := sets[tc.tag]
+		if !ok {
+			t.Fatalf("missing rule-set %q: %v", tc.tag, sets)
+		}
+		if rs["type"] != "remote" || rs["format"] != "binary" {
+			t.Fatalf("%q must be a remote binary rule-set, got %v", tc.tag, rs)
+		}
+		if want := strings.ReplaceAll(tc.tmpl, "{tag}", tc.code); rs["url"] != want {
+			t.Fatalf("%q url = %v, want %v", tc.tag, rs["url"], want)
+		}
+	}
+	if len(warnings) != 3 {
+		t.Fatalf("want one warning per migrated code, got %v", warnings)
+	}
+
+	before, _ := json.Marshal(root)
+	if again := MigrateLegacyJSON(root); len(again) != 0 {
+		t.Fatalf("second run must be silent, got %v", again)
+	}
+	after, _ := json.Marshal(root)
+	if string(before) != string(after) {
+		t.Fatal("geo migration is not idempotent")
+	}
+	if n := len(routeRuleSets(t, root)); n != 3 {
+		t.Fatalf("second run added rule-sets: %d", n)
+	}
+}
+
+// Two rules asking for the same code share one rule-set: the engine rejects a
+// duplicate rule-set tag outright.
+func TestMigrateGeoRuleSetDedupAcrossRules(t *testing.T) {
+	root, _ := migrateDoc(t, `{"route":{"rules":[
+		{"geosite":["cn"],"outbound":"direct"},
+		{"geosite":["cn"],"outbound":"proxy"}
+	]}}`)
+	sets := routeRuleSets(t, root)
+	if len(sets) != 1 {
+		t.Fatalf("want a single geosite-cn rule-set, got %v", sets)
+	}
+	for _, rule := range routeRules(t, root) {
+		if got := jsonStrings(t, rule.(map[string]interface{})["rule_set"]); !equalStrings(got, []string{"geosite-cn"}) {
+			t.Fatalf("rule_set = %v, want [geosite-cn]", got)
+		}
+	}
+}
+
+// source_geoip cannot be expressed as a rule_set (a rule_set matcher compares
+// the destination, and rule_set_ip_cidr_match_source is rule-wide), so it is
+// dropped with a warning that says so. The rest of the rule must survive.
+func TestMigrateSourceGeoIPDropped(t *testing.T) {
+	root, warnings := migrateDoc(t, `{"route":{"rules":[
+		{"source_geoip":["cn"],"port":443,"outbound":"proxy"}
+	]}}`)
+	rule := routeRules(t, root)[0].(map[string]interface{})
+	if _, ok := rule["source_geoip"]; ok {
+		t.Fatalf("source_geoip must be removed: %v", rule)
+	}
+	if _, ok := rule["rule_set"]; ok {
+		t.Fatalf("source_geoip must not become a destination rule_set match: %v", rule)
+	}
+	if _, ok := root["route"].(map[string]interface{})["rule_set"]; ok {
+		t.Fatal("no rule-set may be synthesized for source_geoip")
+	}
+	if rule["port"] != float64(443) {
+		t.Fatalf("other conditions must survive: %v", rule)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("want one warning, got %v", warnings)
+	}
+	if !strings.Contains(warnings[0], "source_geoip") || !strings.Contains(warnings[0], "not carried over") {
+		t.Fatalf("warning must document the limitation, got %q", warnings[0])
+	}
+	if again := MigrateLegacyJSON(root); len(again) != 0 {
+		t.Fatalf("second run must be silent, got %v", again)
+	}
+}
+
+// A rule whose only matcher is source_geoip would arrive at the engine without
+// conditions ("missing conditions") and kill the import, so the rule itself is
+// dropped — after the keys are gone there is nothing faithful left to keep.
+func TestMigrateSourceGeoIPOnlyRuleDropped(t *testing.T) {
+	root, warnings := migrateDoc(t, `{"route":{"rules":[
+		{"source_geoip":["cn"],"outbound":"proxy"},
+		{"port":53,"outbound":"dns-out"}
+	]}}`)
+	rules := routeRules(t, root)
+	if len(rules) != 1 {
+		t.Fatalf("the conditionless rule must be dropped, got %v", rules)
+	}
+	if rules[0].(map[string]interface{})["outbound"] != "dns-out" {
+		t.Fatalf("unrelated rules must survive: %v", rules)
+	}
+	var sawDrop bool
+	for _, w := range warnings {
+		if strings.Contains(w, "rule dropped") {
+			sawDrop = true
+		}
+	}
+	if !sawDrop {
+		t.Fatalf("dropping the rule must be reported, got %v", warnings)
+	}
+	if again := MigrateLegacyJSON(root); len(again) != 0 {
+		t.Fatalf("second run must be silent, got %v", again)
+	}
+	if n := len(routeRules(t, root)); n != 1 {
+		t.Fatalf("second run changed the rule list: %d", n)
+	}
+}
+
+// A geosite nested in a logical rule fails box.New exactly like a top-level
+// one, so the recursion has to reach it.
+func TestMigrateGeoInLogicalRule(t *testing.T) {
+	root, warnings := migrateDoc(t, `{"route":{"rules":[
+		{"type":"logical","mode":"and","rules":[
+			{"geosite":["cn"]},
+			{"port":443}
+		],"outbound":"proxy"}
+	]}}`)
+	logical := routeRules(t, root)[0].(map[string]interface{})
+	if _, ok := logical["rule_set"]; ok {
+		t.Fatalf("the logical rule itself must not gain rule_set: %v", logical)
+	}
+	children, _ := logical["rules"].([]interface{})
+	if len(children) != 2 {
+		t.Fatalf("children lost: %v", children)
+	}
+	child := children[0].(map[string]interface{})
+	if _, ok := child["geosite"]; ok {
+		t.Fatalf("nested geosite must be removed: %v", child)
+	}
+	if got := jsonStrings(t, child["rule_set"]); !equalStrings(got, []string{"geosite-cn"}) {
+		t.Fatalf("child rule_set = %v, want [geosite-cn]", got)
+	}
+	if _, ok := children[1].(map[string]interface{})["rule_set"]; ok {
+		t.Fatalf("sibling without geo matchers must stay untouched: %v", children[1])
+	}
+	if len(routeRuleSets(t, root)) != 1 {
+		t.Fatalf("want one synthesized rule-set, got %v", root["route"])
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "geosite") {
+		t.Fatalf("want the nested rewrite reported, got %v", warnings)
+	}
+}
+
+// DNS rules share option.RawDefaultRule's rule_set field and resolve it through
+// the same route router (route.Router.Initialize runs before
+// dns.Router.Initialize in box.New), so geosite is rewritten there too. A DNS
+// rule-set entry matches the queried domain, which is what geosite did.
+func TestMigrateGeoDNSRule(t *testing.T) {
+	root, warnings := migrateDoc(t, `{"dns":{"rules":[
+		{"geosite":["cn"],"server":"local"}
+	]}}`)
+	dns, _ := root["dns"].(map[string]interface{})
+	rules, _ := dns["rules"].([]interface{})
+	rule := rules[0].(map[string]interface{})
+	if _, ok := rule["geosite"]; ok {
+		t.Fatalf("dns rule geosite must be removed: %v", rule)
+	}
+	if got := jsonStrings(t, rule["rule_set"]); !equalStrings(got, []string{"geosite-cn"}) {
+		t.Fatalf("dns rule_set = %v, want [geosite-cn]", got)
+	}
+	if rule["server"] != "local" {
+		t.Fatalf("dns action must survive: %v", rule)
+	}
+	sets := routeRuleSets(t, root)
+	rs, ok := sets["geosite-cn"]
+	if !ok {
+		t.Fatalf("route.rule_set must back the dns reference: %v", root)
+	}
+	if want := strings.ReplaceAll(DefaultGeoSiteRuleSetURL, "{tag}", "cn"); rs["url"] != want {
+		t.Fatalf("url = %v, want %v", rs["url"], want)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "dns rule") {
+		t.Fatalf("want the dns rewrite reported, got %v", warnings)
+	}
+	if again := MigrateLegacyJSON(root); len(again) != 0 {
+		t.Fatalf("second run must be silent, got %v", again)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Defect 2: the brutal_mbps axis
+// ---------------------------------------------------------------------------
+
+// brutal_mbps is the fixed send rate (option.QUICOptions.BrutalMbps), and 1.4
+// up_mbps/up was the client's send cap — so the uplink is the axis, and down is
+// only a fallback when no uplink cap was declared.
+func TestMigrateHysteriaBrutalSendRate(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		fields string
+		want   int
+	}{
+		{"uplink wins over downlink", `"up_mbps":100,"down_mbps":200`, 100},
+		{"uplink only", `"up_mbps":80`, 80},
+		{"downlink only falls back", `"down_mbps":500`, 500},
+		{"string uplink", `"up":"50 Mbps","down":"1 Gbps"`, 50},
+		{"no cap", `"brutal_debug":true`, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, _ := migrateDoc(t, `{"outbounds":[{"type":"hysteria2","tag":"hy",`+tc.fields+`}]}`)
+			m := firstOutbound(t, root)
+			if tc.want == 0 {
+				if _, ok := m["brutal_mbps"]; ok {
+					t.Fatalf("no cap must not gain brutal_mbps: %v", m)
+				}
+				if _, ok := m["congestion_control"]; ok {
+					t.Fatalf("no cap must not gain congestion_control: %v", m)
+				}
+				return
+			}
+			// The migrator writes an int; only a JSON round-trip would make it
+			// a float64, so compare against the int directly.
+			if m["brutal_mbps"] != tc.want {
+				t.Fatalf("brutal_mbps = %v, want send-rate %d", m["brutal_mbps"], tc.want)
+			}
+			if m["congestion_control"] != "brutal" {
+				t.Fatalf("want brutal congestion control, got %v", m["congestion_control"])
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Defect 4: legacy inbound fields
+// ---------------------------------------------------------------------------
+
+// countSniffActionRules counts the top-level route rules that sniff.
+func countSniffActionRules(t *testing.T, root map[string]interface{}) int {
+	t.Helper()
+	route, _ := root["route"].(map[string]interface{})
+	if route == nil {
+		return 0
+	}
+	rules, _ := route["rules"].([]interface{})
+	n := 0
+	for _, item := range rules {
+		rule, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if action, _ := rule["action"].(string); strings.TrimSpace(action) == "sniff" {
+			n++
+		}
+	}
+	return n
+}
+
+// 1.5 rejects every legacy inbound sniff field (option.Inbound.UnmarshalJSON),
+// which used to cost the inbound on import and the whole profile on Start.
+// sniff:true is lifted into the documented route action instead.
+func TestMigrateInboundSniffFields(t *testing.T) {
+	root, warnings := migrateDoc(t, `{"inbounds":[
+		{"type":"mixed","tag":"in","listen":"127.0.0.1","listen_port":7890,
+		 "sniff":true,"sniff_timeout":"300ms","sniff_override_destination":true,
+		 "domain_strategy":"prefer_ipv4"}
+	]}`)
+	list, _ := root["inbounds"].([]interface{})
+	in := list[0].(map[string]interface{})
+	for _, key := range []string{"sniff", "sniff_timeout", "sniff_override_destination", "domain_strategy"} {
+		if _, ok := in[key]; ok {
+			t.Fatalf("%s must be removed (1.5 hard-rejects it): %v", key, in)
+		}
+	}
+	if in["listen_port"] != float64(7890) || in["listen"] != "127.0.0.1" {
+		t.Fatalf("listen fields must survive: %v", in)
+	}
+	if got := countSniffActionRules(t, root); got != 1 {
+		t.Fatalf("want exactly one sniff action rule, got %d (%v)", got, root["route"])
+	}
+	// The sniff rule has to run before any route/reject rule, or it never fires.
+	if routeRules(t, root)[0].(map[string]interface{})["action"] != "sniff" {
+		t.Fatalf("sniff rule must be first: %v", routeRules(t, root))
+	}
+	var named int
+	for _, w := range warnings {
+		if strings.Contains(w, "sniff_timeout") || strings.Contains(w, "domain_strategy") || strings.Contains(w, "sniff_override_destination") {
+			named++
+		}
+	}
+	if named != 3 {
+		t.Fatalf("each dropped key must be reported, got %v", warnings)
+	}
+
+	if again := MigrateLegacyJSON(root); len(again) != 0 {
+		t.Fatalf("second run must be silent, got %v", again)
+	}
+	if got := countSniffActionRules(t, root); got != 1 {
+		t.Fatalf("second run must not add a sniff rule, got %d", got)
+	}
+}
+
+// sniff:false was already accepted by 1.5 (zero value), so it must not produce
+// a sniff action — but the key itself still has to go.
+func TestMigrateInboundSniffFalseNoRule(t *testing.T) {
+	root, warnings := migrateDoc(t, `{"inbounds":[
+		{"type":"mixed","tag":"in","sniff":false}
+	]}`)
+	if warnings != nil {
+		t.Fatalf("sniff:false must not warn, got %v", warnings)
+	}
+	if _, ok := root["route"]; ok {
+		t.Fatalf("no sniff rule may be synthesized: %v", root["route"])
+	}
+	in := root["inbounds"].([]interface{})[0].(map[string]interface{})
+	if _, ok := in["sniff"]; ok {
+		t.Fatalf("sniff key must be dropped: %v", in)
+	}
+}
+
+// A document that already carries an action=sniff rule keeps just that one.
+func TestMigrateInboundSniffKeepsExistingRule(t *testing.T) {
+	root, warnings := migrateDoc(t, `{"inbounds":[{"type":"mixed","tag":"in","sniff":true}],
+		"route":{"rules":[{"action":"sniff"},{"action":"reject"}]}}`)
+	if got := countSniffActionRules(t, root); got != 1 {
+		t.Fatalf("want one sniff rule, got %d", got)
+	}
+	if len(routeRules(t, root)) != 2 {
+		t.Fatalf("existing rules must not be duplicated: %v", routeRules(t, root))
+	}
+	var sniffWarning bool
+	for _, w := range warnings {
+		if strings.Contains(w, "sniff") {
+			sniffWarning = true
+		}
+	}
+	if !sniffWarning {
+		t.Fatalf("the lifted sniff must still be reported, got %v", warnings)
+	}
+}
+
+// protocol/tun/inbound.go rejects the inet4_/inet6_ address fields outright, so
+// a 1.4 tun inbound was dropped by the soft filter on import (losing the whole
+// tunnel) and failed the profile on Start.
+func TestMigrateTunLegacyAddresses(t *testing.T) {
+	root, warnings := migrateDoc(t, `{"inbounds":[{"type":"tun","tag":"tun-in",
+		"interface_name":"tun0",
+		"inet4_address":"172.19.0.1/30",
+		"inet6_address":["fdfe:dcba:9876::1/126"],
+		"inet4_route_address":["0.0.0.0/1","128.0.0.0/1"],
+		"inet6_route_address":"::/1",
+		"inet4_route_exclude_address":["192.168.0.0/16"],
+		"gso":true}]}`)
+	m := root["inbounds"].([]interface{})[0].(map[string]interface{})
+	for _, key := range []string{
+		"inet4_address", "inet6_address",
+		"inet4_route_address", "inet6_route_address",
+		"inet4_route_exclude_address", "inet6_route_exclude_address",
+		"gso",
+	} {
+		if _, ok := m[key]; ok {
+			t.Fatalf("%s must be removed: %v", key, m)
+		}
+	}
+	for _, tc := range []struct {
+		key  string
+		want []string
+	}{
+		{"address", []string{"172.19.0.1/30", "fdfe:dcba:9876::1/126"}},
+		{"route_address", []string{"0.0.0.0/1", "128.0.0.0/1", "::/1"}},
+		{"route_exclude_address", []string{"192.168.0.0/16"}},
+	} {
+		if got := jsonStrings(t, m[tc.key]); !equalStrings(got, tc.want) {
+			t.Fatalf("%s = %v, want %v", tc.key, got, tc.want)
+		}
+	}
+	if m["interface_name"] != "tun0" {
+		t.Fatalf("unrelated tun fields must survive: %v", m)
+	}
+	var sawGSO bool
+	for _, w := range warnings {
+		if strings.Contains(w, "gso") {
+			sawGSO = true
+		}
+	}
+	if !sawGSO {
+		t.Fatalf("dropping gso must be reported, got %v", warnings)
+	}
+
+	before, _ := json.Marshal(root)
+	if again := MigrateLegacyJSON(root); len(again) != 0 {
+		t.Fatalf("second run must be silent, got %v", again)
+	}
+	after, _ := json.Marshal(root)
+	if string(before) != string(after) {
+		t.Fatal("tun migration is not idempotent")
+	}
+}
+
+// Re-running the merge must not duplicate entries when address already exists.
+func TestMigrateTunAddressMergeIsIdempotentWithExistingAddress(t *testing.T) {
+	root, _ := migrateDoc(t, `{"inbounds":[{"type":"tun","tag":"tun-in",
+		"address":["172.19.0.1/30"],
+		"inet4_address":["172.19.0.1/30","172.19.0.5/30"],
+		"inet6_address":["fdfe::1/126"]}]}`)
+	m := root["inbounds"].([]interface{})[0].(map[string]interface{})
+	want := []string{"172.19.0.1/30", "172.19.0.5/30", "fdfe::1/126"}
+	if got := jsonStrings(t, m["address"]); !equalStrings(got, want) {
+		t.Fatalf("address = %v, want %v (existing first, duplicates skipped)", got, want)
+	}
+	if again := MigrateLegacyJSON(root); len(again) != 0 {
+		t.Fatalf("second run must be silent, got %v", again)
+	}
+	if got := jsonStrings(t, m["address"]); !equalStrings(got, want) {
+		t.Fatalf("second run changed address: %v", got)
 	}
 }
