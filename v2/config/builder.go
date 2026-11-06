@@ -276,6 +276,16 @@ func setOutboundsContext(ctx context.Context, options *option.Options, input *op
 	// parents: user-selectable (selector), but never members of lowest/balance
 	// (a rotation group is not an exit leaf).
 	var rotationTags []string
+	// wrapperTags are engine-1.5 group wrappers (failover/scatter) imported from
+	// a subscription: kept for selection, never treated as dialable leaves.
+	var wrapperTags []string
+	// legendParentVirtuals maps a legend-parent tag to the tags that replace it
+	// at engine start (nil = the parent was dropped whole). Any surviving
+	// reference to it — a wrapper's member list, a chain detour — must be
+	// rewritten before the engine deletes the parent, otherwise box.New fails
+	// with "dependency[...] not found" (proved by the engine's
+	// pathology_legend_group_lx test).
+	legendParentVirtuals := make(map[string]legendRefPlan)
 	// skippedLegendParents names legend parents that produced no rotation group
 	// (no authorised legend / reserved group tag). Tracked so the Direct-fallback
 	// guard can explain itself instead of blaming the IPv6/disabled filters.
@@ -310,6 +320,21 @@ func setOutboundsContext(ctx context.Context, options *option.Options, input *op
 		case C.TypeBlock, C.TypeDNS:
 			continue
 		case C.TypeSelector, C.TypeURLTest, C.TypeBalancer:
+			continue
+		case "failover", "scatter":
+			// Engine-1.5 group wrappers: they wrap leaves (failover.outbounds,
+			// scatter.paths/uplink_paths/downlink_paths) and only dial through
+			// their members. Appending their tag to `tags` would put the wrapper
+			// itself into lowest/balance, i.e. a "leaf" that can never be
+			// dialed directly — the config agent then resolves it through the
+			// group's Selected() and a dead group silently takes the whole
+			// selection with it. They stay in `outbounds` (so a chain exit or a
+			// user selection can still name them) but never in the leaf lists.
+			if contains([]string{"direct", "bypass", "block"}, out.Tag) {
+				continue
+			}
+			outbounds = append(outbounds, out)
+			wrapperTags = append(wrapperTags, out.Tag)
 			continue
 		case "custom": // LX-STUB: C.TypeCustom absent in sing-box-lx
 			continue
@@ -360,6 +385,7 @@ func setOutboundsContext(ctx context.Context, options *option.Options, input *op
 					// warning reaches the UI through the parse-warning channel.
 					warnLegendParentNotEmitted(ctx, out.Tag, "dropped: "+reason)
 					skippedLegendParents = append(skippedLegendParents, out.Tag+": "+reason)
+					legendParentVirtuals[out.Tag] = legendRefPlan{dropped: true}
 					continue
 				}
 				// The parent tag itself is never dialable: ExpandPathologyOutbounds
@@ -388,6 +414,7 @@ func setOutboundsContext(ctx context.Context, options *option.Options, input *op
 					},
 				})
 				rotationTags = append(rotationTags, groupTag)
+				legendParentVirtuals[out.Tag] = legendRefPlan{virtuals: virtuals}
 				continue
 			}
 			if contains([]string{"direct", "bypass", "block"}, out.Tag) {
@@ -431,6 +458,11 @@ func setOutboundsContext(ctx context.Context, options *option.Options, input *op
 
 		endpoints = append(endpoints, *out)
 	}
+
+	// A legend parent is replaced by its virtuals at engine start, so every
+	// reference to it must be rewritten here or the engine cannot resolve it.
+	outbounds = expandLegendParentRefs(ctx, outbounds, legendParentVirtuals)
+	endpoints = expandLegendParentRefsInEndpoints(ctx, endpoints, legendParentVirtuals)
 
 	// WARP nodes live in a dedicated local profile (Flutter WarpAutoProfileSync).
 	// Do not mix them into other profiles — multi-select merge covers composition.

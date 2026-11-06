@@ -436,3 +436,125 @@ func TestPathologyNoAuthorisedLegendWarnsInsteadOfEmittingGroup(t *testing.T) {
 		}
 	}
 }
+
+
+// A failover/scatter wrapper is a VALID chain target and may be selected, but it
+// is never a dialable leaf: putting its tag into lowest/balance makes the config
+// agent treat a wrapper as an exit address that can never be dialed directly.
+func TestGroupWrappersAreNotLeaves(t *testing.T) {
+	input := &option.Options{
+		Outbounds: []option.Outbound{
+			testVLESSLeaf("node-a"),
+			{
+				Type: C.TypeFailover,
+				Tag:  "fo",
+				Options: &option.FailoverOutboundOptions{
+					Outbounds: []string{"node-a"},
+				},
+			},
+			{
+				Type: C.TypeScatter,
+				Tag:  "sc",
+				Options: &option.ScatterOutboundOptions{
+					Paths: []string{"node-a"},
+				},
+			},
+		},
+	}
+	out, _ := buildOutbounds(t, input)
+
+	present := map[string]bool{}
+	for _, o := range out.Outbounds {
+		present[o.Tag] = true
+	}
+	if !present["fo"] || !present["sc"] {
+		t.Fatalf("wrappers must stay in outbounds (selectable / chain-addressable): %v", present)
+	}
+	for _, o := range out.Outbounds {
+		if o.Type != C.TypeBalancer {
+			continue
+		}
+		if o.Tag != OutboundURLTestTag && o.Tag != OutboundRoundRobinTag {
+			continue
+		}
+		members, _ := o.Options.(*option.BalancerOutboundOptions)
+		if members == nil {
+			continue
+		}
+		for _, tag := range members.Outbounds {
+			if tag == "fo" || tag == "sc" {
+				t.Fatalf("%s must not dial a group wrapper %q directly", o.Tag, tag)
+			}
+		}
+	}
+}
+
+// A wrapper naming a legend PARENT is the same dangling-tag trap the engine
+// proves in TestPathologyLegendParentInGroupMemberList_LX: expansion deletes the
+// parent, so box.New cannot resolve `fo -> path-auto`. The builder rewrites the
+// reference to the virtuals that will exist.
+func TestWrapperOverLegendParentIsRewrittenToVirtuals(t *testing.T) {
+	input := &option.Options{
+		Outbounds: []option.Outbound{
+			pathologyLegendOutbound("path-auto", []string{"stun", "dns"}, []string{"stun", "dns"}),
+			{
+				Type: C.TypeFailover,
+				Tag:  "fo",
+				Options: &option.FailoverOutboundOptions{
+					Outbounds: []string{"path-auto", "node-a"},
+				},
+			},
+			testVLESSLeaf("node-a"),
+		},
+	}
+	out, _ := buildOutbounds(t, input)
+
+	var failover *option.FailoverOutboundOptions
+	for _, o := range out.Outbounds {
+		if o.Tag == "fo" {
+			failover, _ = o.Options.(*option.FailoverOutboundOptions)
+		}
+	}
+	if failover == nil {
+		t.Fatal("failover wrapper missing from the built config")
+	}
+	want := []string{"path-auto-dns", "path-auto-stun", "node-a"}
+	if len(failover.Outbounds) != len(want) {
+		t.Fatalf("members = %v, want %v (parent expanded in place)", failover.Outbounds, want)
+	}
+	for i := range want {
+		if failover.Outbounds[i] != want[i] {
+			t.Fatalf("members = %v, want %v", failover.Outbounds, want)
+		}
+	}
+	// The invariant that matters: after engine-side expansion nothing dangles.
+	assertGroupsReferenceLiveTags(t, out)
+}
+
+// A wrapper over a parent that was dropped whole loses that member; with no
+// members left the wrapper itself must go, not start with an empty list.
+// A healthy leaf rides along so the pool is not "all dropped" (a pathology-only
+// profile whose only parent died is a separate, already-covered error path).
+func TestWrapperOverDroppedLegendParentIsDropped(t *testing.T) {
+	input := &option.Options{
+		Outbounds: []option.Outbound{
+			testVLESSLeaf("node-a"),
+			// Legends without any auth: the parent cannot be expanded at all.
+			pathologyLegendOutbound("path-dead", []string{"stun"}, nil),
+			{
+				Type:    C.TypeFailover,
+				Tag:     "fo",
+				Options: &option.FailoverOutboundOptions{Outbounds: []string{"path-dead"}},
+			},
+		},
+	}
+	out, collector := buildOutbounds(t, input)
+	for _, o := range out.Outbounds {
+		if o.Tag == "fo" {
+			t.Fatalf("a wrapper whose only member is a dropped parent must be dropped: %v", out.Outbounds)
+		}
+	}
+	if !strings.Contains(collector.MessageJSON(), "path-dead") {
+		t.Fatalf("the dropped reference must be reported: %s", collector.MessageJSON())
+	}
+}
