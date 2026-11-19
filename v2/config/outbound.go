@@ -65,13 +65,26 @@ func patchOutboundFragment(base option.Outbound, configOpt ClientOptions) option
 	if tlsopt, ok := base.Options.(option.OutboundTLSOptionsWrapper); ok {
 		tls := tlsopt.TakeOutboundTLSOptions()
 		if tls != nil && tls.Enabled {
-			if tricks.EnableFragment {
-				tls.Fragment = true
+			// A subscription may already carry an explicit shaping decision
+			// (the CP "fragmenter" section or a hand-tuned profile). The two
+			// fields are plain bools, so "unset" and "false" are the same, but
+			// either true flag is an explicit request: never add the other one
+			// (the engine rejects fragment+record_fragment) and never override
+			// the fallback delay it shipped with.
+			explicit := tls.Fragment || tls.RecordFragment
+			if !explicit {
+				// The engine rejects both flags together. When both global
+				// switches are on, record fragmentation wins: it is the
+				// cheaper, recommended mode.
+				if tricks.EnableRecordFragment {
+					tls.RecordFragment = true
+				} else {
+					tls.Fragment = true
+				}
 			}
-			if tricks.EnableRecordFragment {
-				tls.RecordFragment = true
+			if tls.FragmentFallbackDelay == 0 {
+				tls.FragmentFallbackDelay = parseFragmentFallbackDelay(tricks.FragmentFallbackDelay)
 			}
-			tls.FragmentFallbackDelay = parseFragmentFallbackDelay(tricks.FragmentFallbackDelay)
 			tlsopt.ReplaceOutboundTLSOptions(tls)
 		}
 	}

@@ -12,6 +12,12 @@ import (
 // are marshalled to JSON and run through libbox.CheckConfig (strict decode +
 // box.New/Close under a platform stub). box.New is by far the dominant cost,
 // so the extra marshal round-trip is negligible here.
+//
+// Do NOT "optimise" this by handing the pre-filter bytes to libbox.CheckConfig
+// instead. The marshal is load-bearing: it validates the CANONICALISED document
+// (what the engine will actually receive), while the filtered input still holds
+// keys the decoder ignored and lacks the defaults it filled in. Checking the raw
+// bytes would validate a different document and could flip a verdict.
 func CheckConfigOptions(ctx context.Context, options *option.Options) error {
 	raw, err := options.MarshalJSONContext(ctx)
 	if err != nil {

@@ -109,6 +109,9 @@ func BuildConfig(ctx context.Context, hopts *ClientOptions, inputOpt *ReadOption
 	if err := setOutboundsContext(ctx, &options, input, hopts, &staticIPs); err != nil {
 		return nil, err
 	}
+	// l3router overlays: the TUN must own the mesh prefixes before any route
+	// rule can steer overlay traffic into the endpoints.
+	applyL3RouterTunAddresses(&options, hopts)
 
 	useSubDNS := input.DNS != nil && len(input.DNS.Servers) > 0 && !hopts.IgnoreSubscriptionDNS
 	if useSubDNS {
@@ -301,6 +304,9 @@ func setOutboundsContext(ctx context.Context, options *option.Options, input *op
 	if opt.TestMode {
 		keepIPv6 = true
 	}
+	// l3router underlay outbounds carry the mesh transport; they are dialed by
+	// the endpoint, not picked as proxies.
+	meshUnderlayTags := l3routerUnderlayTags(input.Endpoints)
 	for _, out := range input.Outbounds {
 
 		if contains(PredefinedOutboundTags, out.Tag) {
@@ -422,7 +428,7 @@ func setOutboundsContext(ctx context.Context, options *option.Options, input *op
 			if contains([]string{"direct", "bypass", "block"}, out.Tag) {
 				continue
 			}
-			if !strings.Contains(out.Tag, "§hide§") && !isOutboundDisabled(out.Tag, opt.DisabledOutboundTags) {
+			if !strings.Contains(out.Tag, "§hide§") && !isOutboundDisabled(out.Tag, opt.DisabledOutboundTags) && !isMeshUnderlayTag(meshUnderlayTags, out.Tag) {
 				tags = append(tags, out.Tag)
 			}
 			outbounds = append(outbounds, out)
@@ -431,7 +437,7 @@ func setOutboundsContext(ctx context.Context, options *option.Options, input *op
 			if contains([]string{"direct", "bypass", "block"}, out.Tag) {
 				continue
 			}
-			if !strings.Contains(out.Tag, "§hide§") && !isOutboundDisabled(out.Tag, opt.DisabledOutboundTags) {
+			if !strings.Contains(out.Tag, "§hide§") && !isOutboundDisabled(out.Tag, opt.DisabledOutboundTags) && !isMeshUnderlayTag(meshUnderlayTags, out.Tag) {
 				tags = append(tags, out.Tag)
 			}
 			outbounds = append(outbounds, out)
@@ -440,6 +446,27 @@ func setOutboundsContext(ctx context.Context, options *option.Options, input *op
 
 	for _, end := range input.Endpoints {
 		if contains(PredefinedOutboundTags, end.Tag) {
+			continue
+		}
+		if isL3RouterEndpoint(&end) {
+			// An l3router endpoint is a network interface, never a proxy leaf:
+			// its tag stays out of the pool lists below. The side TestEngine
+			// skips it entirely — a second underlay session replaces the main
+			// core's on the hub (same trap as punnel).
+			if opt.TestMode {
+				continue
+			}
+			if isV6, known := l3routerFamilyV6(&end); known && isV6 && !keepIPv6 {
+				continue
+			}
+			if isOutboundDisabled(end.Tag, opt.DisabledOutboundTags) {
+				continue
+			}
+			out, err := patchEndpoint(&end, *opt, staticIPs)
+			if err != nil {
+				return err
+			}
+			endpoints = append(endpoints, *out)
 			continue
 		}
 		if !keepIPv6 && IsIPv6Leaf(end.Tag, "") {
@@ -460,6 +487,11 @@ func setOutboundsContext(ctx context.Context, options *option.Options, input *op
 
 		endpoints = append(endpoints, *out)
 	}
+
+	// An l3router endpoint dials through its mesh transport outbound; if that
+	// outbound was filtered out, keeping the endpoint fails the whole profile at
+	// box.New ("dependency[...] not found").
+	endpoints = dropL3RouterEndpointsWithDeadDetour(endpoints, outbounds)
 
 	// A legend parent is replaced by its virtuals at engine start, so every
 	// reference to it must be rewritten here or the engine cannot resolve it.
@@ -767,6 +799,12 @@ func countInputProxyLeaves(input *option.Options) int {
 	}
 	for _, end := range input.Endpoints {
 		if contains(PredefinedOutboundTags, end.Tag) || strings.Contains(end.Tag, "§hide§") {
+			continue
+		}
+		// An l3router endpoint is an overlay interface, not a proxy exit: a
+		// mesh-only profile must fall through to the Direct-only branch instead
+		// of tripping the "refusing Direct fallback" guard.
+		if isL3RouterEndpoint(&end) {
 			continue
 		}
 		n++
@@ -1093,6 +1131,11 @@ func setRoutingOptions(options *option.Options, input *option.Options, hopt *Cli
 		})
 	}
 
+	// l3router overlay subnets are RFC1918/ULA space: their rules must precede
+	// the 10.10.34.0/24 and BypassLAN rules below, or every mesh packet is
+	// routed Direct and the overlay is unreachable while looking healthy.
+	routeRules = append(routeRules, l3routerOverlayRules(options.Endpoints)...)
+
 	routeRules = append(routeRules, option.Rule{
 		Type: C.RuleTypeDefault,
 
@@ -1184,6 +1227,13 @@ func setRoutingOptions(options *option.Options, input *option.Options, hopt *Cli
 	if hopt.BlockAds && hopt.AdsRuleSetPath != "" {
 		appendAdsBlockRules(&rulesets, &routeRules, hopt.AdsRuleSetPath)
 	}
+
+	// l3router exit node (use_exit_node): WAN traffic through the mesh. Runs
+	// after BypassLAN, the NTP carve-out and the client's own ad blocker — LAN,
+	// NTP and ads keep their treatment — and before the profile buckets, so a
+	// profile rule cannot pull WAN traffic back out of the mesh the user asked
+	// for ("ALL traffic through l3router", FEATURE 017 exit contract).
+	routeRules = append(routeRules, l3routerExitRules(options.Endpoints)...)
 
 	// L4: client-owned route — local profile stack first, then optional subscription overlay.
 	var localRS []option.RuleSet

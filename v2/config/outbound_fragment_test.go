@@ -31,7 +31,9 @@ func TestPatchOutboundFragmentTLS(t *testing.T) {
 		t.Fatal(err)
 	}
 	tls := out.Options.(*option.VLESSOutboundOptions).TLS
-	if tls == nil || !tls.Fragment || !tls.RecordFragment {
+	// Both global switches on must still yield one valid mode: the engine
+	// rejects fragment+record_fragment.
+	if tls == nil || tls.Fragment || !tls.RecordFragment {
 		t.Fatalf("tls=%#v", tls)
 	}
 	if time.Duration(tls.FragmentFallbackDelay) != 300*time.Millisecond {
@@ -40,6 +42,68 @@ func TestPatchOutboundFragmentTLS(t *testing.T) {
 	dialer := out.Options.(*option.VLESSOutboundOptions).DialerOptions
 	if dialer.TCPFastOpen {
 		t.Fatal("TCPFastOpen should be off")
+	}
+}
+
+// A subscription (CP fragmenter) may ship its own shaping decision. That must
+// win over the global switches: the default record fragment must not be added
+// on top of an explicit packet fragment (the engine rejects both), and the
+// shipped fallback delay must survive.
+func TestPatchOutboundFragmentExplicitPacketWins(t *testing.T) {
+	t.Parallel()
+	opt := *DefaultClientOptions() // EnableRecordFragment defaults to true
+	opt.TLSTricks.EnableFragment = true
+	opt.TLSTricks.EnableRecordFragment = true
+	opt.TLSTricks.FragmentFallbackDelay = "300ms"
+
+	base := option.Outbound{
+		Type: C.TypeVLESS,
+		Tag:  "cp-shaped",
+		Options: &option.VLESSOutboundOptions{
+			OutboundTLSOptionsContainer: option.OutboundTLSOptionsContainer{
+				TLS: &option.OutboundTLSOptions{
+					Enabled:               true,
+					Fragment:              true,
+					FragmentFallbackDelay: badoption.Duration(450 * time.Millisecond),
+				},
+			},
+		},
+	}
+	out, err := patchOutbound(base, opt, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tls := out.Options.(*option.VLESSOutboundOptions).TLS
+	if !tls.Fragment || tls.RecordFragment {
+		t.Fatalf("explicit packet mode overridden: %#v", tls)
+	}
+	if time.Duration(tls.FragmentFallbackDelay) != 450*time.Millisecond {
+		t.Fatalf("explicit delay overridden: %v", tls.FragmentFallbackDelay)
+	}
+}
+
+func TestPatchOutboundFragmentExplicitRecordWins(t *testing.T) {
+	t.Parallel()
+	opt := *DefaultClientOptions()
+	opt.TLSTricks.EnableFragment = true
+	opt.TLSTricks.EnableRecordFragment = false
+
+	base := option.Outbound{
+		Type: C.TypeTrojan,
+		Tag:  "cp-shaped",
+		Options: &option.TrojanOutboundOptions{
+			OutboundTLSOptionsContainer: option.OutboundTLSOptionsContainer{
+				TLS: &option.OutboundTLSOptions{Enabled: true, RecordFragment: true},
+			},
+		},
+	}
+	out, err := patchOutbound(base, opt, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tls := out.Options.(*option.TrojanOutboundOptions).TLS
+	if tls.Fragment || !tls.RecordFragment {
+		t.Fatalf("explicit record mode overridden: %#v", tls)
 	}
 }
 
