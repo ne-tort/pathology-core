@@ -19,10 +19,10 @@ var (
 	transitionWatching bool
 )
 
-// trayErrorState marks the last session action as failed. While the core is
-// STOPPED with this flag set the tray shows the red icon (error); it clears on
-// the next error-free action or any STARTED transition. Atomic: written from
-// menu goroutines, read on the tray UI goroutine.
+// trayErrorState marks the last session action as failed. While set, the tray
+// shows the error tooltip; it clears on the next error-free action or any
+// STARTED transition. Atomic: written from menu goroutines, read on the tray
+// UI goroutine.
 var trayErrorState atomic.Bool
 
 func setTrayError(hasError bool) { trayErrorState.Store(hasError) }
@@ -36,34 +36,14 @@ const transitionPollCeiling = 10 * time.Second
 // transitionPollInterval is the cadence while STARTING/STOPPING.
 const transitionPollInterval = 300 * time.Millisecond
 
-func applyTrayIcon(state hcore.CoreStates, darkTheme bool) {
-	// The icon must contrast with the *panel*, which is not the same thing as
-	// the app theme: Ubuntu's top bar is #131313 even in the default (light)
-	// Yaru scheme, so the dark glyph vanished there. useLightTrayIcon decides.
-	light := useLightTrayIcon(darkTheme)
-	disconnected, connecting, connected := trayIconSet(light)
-	var icon []byte
-	switch state {
-	case hcore.CoreStates_STARTED:
+// applyTrayIcon shows the single full-color logo for every state: the icon
+// no longer encodes connection state, theme or errors (those surface via the
+// toggle label and the error tooltip).
+func applyTrayIcon(state hcore.CoreStates) {
+	if state == hcore.CoreStates_STARTED {
 		trayErrorState.Store(false)
-		icon = connected
-	case hcore.CoreStates_STARTING, hcore.CoreStates_STOPPING:
-		icon = connecting
-	default:
-		switch {
-		case trayErrorState.Load():
-			// Stopped after a failed session action: red-on-black error icon
-			// (same asset as the transition red; semantics via state).
-			icon = connecting
-		case light:
-			icon = disconnected
-		default:
-			icon = trayIconDark
-		}
 	}
-	if len(icon) > 0 {
-		systray.SetIcon(icon)
-	}
+	systray.SetIcon(trayIcon)
 }
 
 // refreshConnectionUI mutates the icon and toggle label. It must be safe to
@@ -77,7 +57,7 @@ func refreshConnectionUI(state hcore.CoreStates) {
 // tray UI goroutine (i.e. inside dispatch) to avoid races.
 func refreshConnectionUISync(state hcore.CoreStates) {
 	refreshConnectionMenu(state)
-	applyTrayIcon(state, darkMenu)
+	applyTrayIcon(state)
 }
 
 // watchCoreTransitions polls briefly only while STARTING/STOPPING (icon + toggle

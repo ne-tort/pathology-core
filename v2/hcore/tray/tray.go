@@ -119,7 +119,7 @@ func onReady() {
 	applyDarkContextMenu()
 	systray.SetTitle("Pathology")
 	systray.SetTooltip("Pathology")
-	applyTrayIcon(hcore.CurrentCoreState(), darkMenu)
+	applyTrayIcon(hcore.CurrentCoreState())
 
 	startPrefsWatcher(trayCtx, basePath)
 
@@ -188,8 +188,8 @@ func handleSession(fn func(context.Context) (*hcore.CoreInfoResponse, error)) {
 	resp, err := fn(context.Background())
 	state := hcore.CurrentCoreState()
 	msg := hcore.SessionLastErrorMessage(resp, err)
-	// Red tray icon + error tooltip while the last session action failed; both
-	// clear on the next error-free action (the icon also clears on STARTED).
+	// Error tooltip while the last session action failed; it clears on the
+	// next error-free action (the tray icon itself stays the same logo).
 	setTrayError(msg != "")
 	if msg != "" {
 		systray.SetTooltip("Pathology — " + msg)
